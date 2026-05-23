@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(nix develop *)",
+      "Bash(pnpm tsc *)",
+      "mcp__media-tools__overseerr_search",
+      "mcp__media-tools__overseerr_search_person",
+      "mcp__media-tools__overseerr_person_credits",
+      "mcp__media-tools__overseerr_watch_providers",
+      "mcp__media-tools__overseerr_recommend",
+      "mcp__media-tools__overseerr_trending",
+      "mcp__media-tools__overseerr_get_quota",
+      "mcp__media-tools__overseerr_list_requests",
+      "mcp__media-tools__overseerr_get_request",
+      "mcp__media-tools__overseerr_create_request",
+      "mcp__media-tools__overseerr_cancel_request",
+      "mcp__media-tools__overseerr_report_issue",
+      "mcp__media-tools__mdblist_ratings",
+      "mcp__media-tools__plex_recently_added",
+      "mcp__media-tools__plex_watch_history",
+      "mcp__media-tools__plex_unwatched",
+      "mcp__media-tools__plex_search",
+      "mcp__media-tools__plex_get_matches",
+      "mcp__media-tools__plex_apply_match",
+      "mcp__media-tools__radarr_replace_movie",
+      "mcp__media-tools__sonarr_replace"
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+# dependencies / build
+node_modules/
+dist/
+
+# secrets
+.env
+
+# runtime data
+logs/
+last-run.json
+seen.json
+
+# nix
+result
+result-*
+.direnv/
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
