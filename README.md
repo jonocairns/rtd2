@@ -1,6 +1,6 @@
 # media-agent
 
-A REPL-based AI agent for managing a self-hosted media setup (Plex + Overseerr/Seerr + mdblist), built on the Claude Agent SDK.
+A REPL-based AI agent for managing a self-hosted media setup (Plex + Overseerr/Seerr + mdblist), built on Vercel AI SDK Core.
 
 See [PRD.md](PRD.md) for the full design.
 
@@ -33,7 +33,10 @@ How to obtain each credential:
 
 | Variable | How to get it |
 |---|---|
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API Keys |
+| `MODEL_PROVIDER` | `openai` or `anthropic`; defaults to OpenAI when `OPENAI_API_KEY` is set |
+| `MODEL_NAME` | Optional model override; defaults to `gpt-5.2` for OpenAI or `claude-sonnet-4-6` for Anthropic |
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) → API keys |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API Keys; required when `MODEL_PROVIDER=anthropic` |
 | `OVERSEERR_API_KEY` | Overseerr/Seerr UI → Settings → General → API Key |
 | `PLEX_URL` | Your Plex server URL — local typically `http://<host>:32400` |
 | `PLEX_TOKEN` | See the [Plex docs](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) — easiest method is browser dev tools while logged into Plex Web |
@@ -47,11 +50,11 @@ pnpm build        # compile to dist/
 pnpm start        # run compiled
 pnpm typecheck    # type-check src + tests + evals
 pnpm test         # run unit tests (vitest, mocked fetch)
-pnpm eval         # run scripted-conversation evals once (hits real Claude, costs API credits)
+pnpm eval         # run scripted-conversation evals once (hits the configured model provider, costs API credits)
 pnpm eval:ui      # serve the evalite UI against existing run history (no new run, no API spend)
 ```
 
-Evals run via [evalite](https://www.npmjs.com/package/evalite) and need a real `ANTHROPIC_API_KEY` in `.env` or the shell. The runner mocks Plex/Overseerr/Radarr/Sonarr but lets the actual Claude API through, so each scenario is a genuine model invocation. Run history is persisted at `node_modules/.evalite/cache.sqlite`.
+Evals run via [evalite](https://www.npmjs.com/package/evalite) and need a real model provider API key in `.env` or the shell. The runner mocks Plex/Overseerr/Radarr/Sonarr but lets the configured model API through, so each scenario is a genuine model invocation. Run history is persisted at `node_modules/.evalite/cache.sqlite`.
 
 First run only: `pnpm approve-builds` and accept `better-sqlite3` (evalite's storage backend). See [GUARDRAILS.md §7](GUARDRAILS.md) for the design.
 
@@ -72,7 +75,7 @@ Then talk to the agent about your library. Examples:
 > what's in my library by Villeneuve?
 ```
 
-The agent will ask for confirmation before making any changes (creating Overseerr requests). Pass `--yolo` to skip confirmation.
+The agent will ask for confirmation before making mutating changes. Pass `--yolo` to skip confirmation.
 
 ## Project structure
 

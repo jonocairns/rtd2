@@ -1,15 +1,16 @@
-import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { reportTrace } from 'evalite/traces';
 import { run } from '../src/agent.js';
+import type { CanUseTool } from '../src/confirm.js';
 import type { MockRoute } from '../src/tools/_testing.js';
 import { addUsage, emptyUsage, type Usage } from './_cost.js';
 
-// Hosts that pass through to real fetch — Claude API + a couple of read-only
+// Hosts that pass through to real fetch — model APIs + a couple of read-only
 // info endpoints. Everything else MUST match a mock route or the call throws.
 // This is a safety allowlist: we never want the eval to hit a real Plex /
 // Overseerr / Radarr / Sonarr even if env URLs accidentally point there.
 const PASS_THROUGH_HOSTS = new Set([
   'api.anthropic.com',
+  'api.openai.com',
   'raw.githubusercontent.com', // LiteLLM pricing fetch
 ]);
 
@@ -36,9 +37,12 @@ export async function runScenario({
   routes,
   canUseTool,
 }: ScenarioOptions): Promise<ScenarioResult> {
-  if (!process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY === 'test-anthropic-key') {
+  const provider = process.env.MODEL_PROVIDER ?? (process.env.OPENAI_API_KEY ? 'openai' : 'anthropic');
+  const requiredKey = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+  const testKey = provider === 'openai' ? 'test-openai-key' : 'test-anthropic-key';
+  if (!process.env[requiredKey] || process.env[requiredKey] === testKey) {
     throw new Error(
-      'Evals need a real ANTHROPIC_API_KEY. Set it in .env or your shell before running `pnpm eval`.'
+      `Evals need a real ${requiredKey}. Set it in .env or your shell before running \`pnpm eval\`.`
     );
   }
 
@@ -98,41 +102,22 @@ export async function runScenario({
   try {
     for await (const message of run({ prompt: promptIterable, canUseTool: gate })) {
       rawMessages.push(message);
-      const m = message as {
-        type?: string;
-        message?: {
-          content?: unknown;
-          usage?: {
-            input_tokens?: number;
-            output_tokens?: number;
-            cache_creation_input_tokens?: number;
-            cache_read_input_tokens?: number;
-          };
-        };
-      };
-
-      const raw = m.message?.usage;
-      if (raw) {
+      if (message.type === 'usage') {
         usage = addUsage(usage, {
-          inputTokens: raw.input_tokens ?? 0,
-          outputTokens: raw.output_tokens ?? 0,
-          cacheWriteTokens: raw.cache_creation_input_tokens ?? 0,
-          cacheReadTokens: raw.cache_read_input_tokens ?? 0,
+          inputTokens: message.usage.inputTokens ?? 0,
+          outputTokens: message.usage.outputTokens ?? 0,
+          cacheWriteTokens: message.usage.cacheWriteTokens ?? 0,
+          cacheReadTokens: message.usage.cacheReadTokens ?? 0,
         });
       }
 
-      if (m.type !== 'assistant') continue;
-      const content = m.message?.content;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (block?.type === 'tool_use' && typeof block.name === 'string') {
-          toolCalls.push({
-            name: block.name.replace(/^mcp__[^_]+__/, ''),
-            input: block.input,
-          });
-        } else if (block?.type === 'text' && typeof block.text === 'string') {
-          finalText += block.text;
-        }
+      if (message.type === 'tool_call') {
+        toolCalls.push({
+          name: message.name,
+          input: message.input,
+        });
+      } else if (message.type === 'assistant_text_delta') {
+        finalText += message.text;
       }
     }
   } finally {

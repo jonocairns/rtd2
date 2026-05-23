@@ -1,13 +1,16 @@
-// Eval-specific setup. Load .env so ANTHROPIC_API_KEY is available, then
+// Eval-specific setup. Load .env so the configured model API key is available, then
 // FORCIBLY override every backend URL with a non-routable test hostname so
 // the fetch interceptor in _runner.ts catches all tool traffic. Without this
 // override, a real .env (Plex/Overseerr/Radarr/Sonarr URLs) would leak
 // through and the eval would mutate live services.
 import 'dotenv/config';
 
-if (!process.env.ANTHROPIC_API_KEY) {
+const provider = process.env.MODEL_PROVIDER ?? (process.env.OPENAI_API_KEY ? 'openai' : 'anthropic');
+const requiredKey = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+
+if (!process.env[requiredKey]) {
   throw new Error(
-    'ANTHROPIC_API_KEY is required to run evals. Set it in .env or your shell.'
+    `${requiredKey} is required to run evals. Set it in .env or your shell.`
   );
 }
 

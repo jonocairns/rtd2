@@ -4,7 +4,7 @@ A REPL-based AI agent for managing a self-hosted media setup. You launch it, hav
 
 > **mdblist not included.** The user already runs [ListSync](https://github.com/Woahai321/list-sync) to import mdblist curated lists into Overseerr — that workflow doesn't need to live in this agent. For ad-hoc additions, the user names titles directly and the agent searches + requests them.
 
-Built on the Claude Agent SDK (TypeScript) with skills as a first-class concept — the LLM is genuinely load-bearing here.
+Built on Vercel AI SDK Core (TypeScript) with provider selection kept outside the service tools — the LLM is genuinely load-bearing here.
 
 > **Note on Overseerr / Seerr.** The original Overseerr repo was archived Feb 2026 and superseded by [Seerr](https://seerr.dev/) (unified Overseerr + Jellyseerr). The REST API surface is largely the same, so we target the shared API and refer to it as "Overseerr/Seerr" throughout.
 
@@ -64,17 +64,17 @@ Multi-turn, tools/skills surfaced as they're used (`[bracketed lines]` so you ca
 
 ## 4. Architecture
 
-- **Model:** Claude Sonnet 4.6 (`claude-sonnet-4-6`)
-- **SDK:** `@anthropic-ai/claude-agent-sdk` (TypeScript)
-- **Interaction:** REPL driven by `readline`. Each user turn is passed to the SDK's streaming `query()` interface; tool calls and skill loads are surfaced as they happen.
-- **Tools:** TypeScript functions wrapped as SDK tools — see §5.
+- **Model:** Configurable through `MODEL_PROVIDER` + `MODEL_NAME` (OpenAI or Anthropic initially)
+- **SDK:** Vercel AI SDK Core (`ai`, `@ai-sdk/openai`, `@ai-sdk/anthropic`)
+- **Interaction:** REPL driven by `readline`. Each user turn is passed to an AI SDK `streamText()` loop; tool calls are surfaced as they happen.
+- **Tools:** TypeScript functions adapted into AI SDK tools — see §5.
 - **Skills:** Markdown under `skills/` loaded on-demand — see §6.
 - **System prompt:** Establishes the agent's role (media librarian), the user's setup (Plex + Overseerr + mdblist), and the confirmation discipline (never mutate without explicit user confirmation).
 - **Max turns per user query:** 30 (bounded; prevents runaway tool calls on a single query).
 
 ## 5. Tools (v1)
 
-All tools are TypeScript functions wrapped as SDK tool definitions.
+All tools are TypeScript functions exposed to the model as AI SDK tool definitions.
 
 **Overseerr/Seerr** (read + write — writes are confirmation-gated):
 - `overseerr_search(query, year?)` — search + library status of a title
@@ -83,6 +83,7 @@ All tools are TypeScript functions wrapped as SDK tool definitions.
 - `overseerr_watch_providers(tmdbId, mediaType, region?)` — streaming/rent/buy availability (default region US)
 - `overseerr_recommend(tmdbId, mediaType)` — TMDB similar-titles
 - `overseerr_trending(mediaType)` — discover trending
+- `overseerr_discover(mediaType?, genre, take?)` — discover by genre with library status; powers bare genre prompts like "horror"
 - `overseerr_list_requests(filters)` — list current requests
 - `overseerr_get_request(id)` — request detail (status, download progress)
 - `overseerr_get_quota()` — remaining requests for this user
@@ -173,7 +174,10 @@ rt2/
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Claude API auth |
+| `MODEL_PROVIDER` | `openai` or `anthropic` (optional; inferred from available keys if unset) |
+| `MODEL_NAME` | Model override (optional; defaults by provider) |
+| `OPENAI_API_KEY` | OpenAI API auth when using `MODEL_PROVIDER=openai` |
+| `ANTHROPIC_API_KEY` | Anthropic API auth when using `MODEL_PROVIDER=anthropic` |
 | `OVERSEERR_URL` | e.g. `https://overseerr.example.com` (no trailing slash) |
 | `OVERSEERR_API_KEY` | Overseerr Settings → General → API Key |
 | `PLEX_URL` | e.g. `http://plex.local:32400` |
@@ -201,7 +205,7 @@ No subcommands. Everything happens through the REPL.
 
 ## 11. Open / deferred decisions
 
-- Exact TS Agent SDK API for loading a skills directory — verify against current SDK version at build time.
+- Whether skills should remain prompt-only files or become first-class runtime primitives in a future framework layer.
 - **v2 candidates:** Tautulli for richer stats, Sonarr/Radarr direct, persistent multi-session memory, Trakt integration, scheduled headless mode (`media-agent run "<query>"` for cron), web UI.
 
 ## 12. Acceptance criteria

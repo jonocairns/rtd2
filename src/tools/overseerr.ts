@@ -1,4 +1,4 @@
-import { tool } from '@anthropic-ai/claude-agent-sdk';
+import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { safe } from './errors.js';
@@ -278,6 +278,113 @@ export const overseerr_trending = tool(
     const missing = hits.filter((h) => h.libraryStatus === 'missing').length;
     return envelope(
       `${plural(hits.length, 'trending title')} (${missing} not in library)`,
+      hits
+    );
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+const movieGenres: Record<string, number> = {
+  action: 28,
+  adventure: 12,
+  animation: 16,
+  animated: 16,
+  comedy: 35,
+  crime: 80,
+  documentary: 99,
+  drama: 18,
+  family: 10751,
+  fantasy: 14,
+  history: 36,
+  historical: 36,
+  horror: 27,
+  music: 10402,
+  mystery: 9648,
+  romance: 10749,
+  'rom-com': 10749,
+  romcom: 10749,
+  scifi: 878,
+  'sci-fi': 878,
+  sciencefiction: 878,
+  'science-fiction': 878,
+  thriller: 53,
+  war: 10752,
+  western: 37,
+};
+
+const tvGenres: Record<string, number> = {
+  action: 10759,
+  adventure: 10759,
+  animation: 16,
+  animated: 16,
+  comedy: 35,
+  crime: 80,
+  documentary: 99,
+  drama: 18,
+  family: 10751,
+  kids: 10762,
+  mystery: 9648,
+  news: 10763,
+  reality: 10764,
+  romance: 10749,
+  scifi: 10765,
+  'sci-fi': 10765,
+  fantasy: 10765,
+  soap: 10766,
+  talk: 10767,
+  war: 10768,
+  politics: 10768,
+  western: 37,
+};
+
+function normalizeGenre(genre: string): string {
+  return genre.toLowerCase().replace(/[\s_]+/g, '-').replace(/&/g, 'and');
+}
+
+function genreIdFor(mediaType: 'movie' | 'tv', genre: string): number {
+  const normalized = normalizeGenre(genre);
+  const compact = normalized.replace(/-/g, '');
+  const genres = mediaType === 'movie' ? movieGenres : tvGenres;
+  const id = genres[normalized] ?? genres[compact];
+  if (!id) {
+    throw new Error(
+      `Unknown ${mediaType} genre "${genre}". Try one of: ${Object.keys(genres)
+        .sort()
+        .join(', ')}.`
+    );
+  }
+  return id;
+}
+
+export const overseerr_discover = tool(
+  'overseerr_discover',
+  'Discover popular movies or TV shows by genre with library status. Use this for bare genre prompts like "horror", "sci-fi", "comedy", or "thriller".',
+  {
+    mediaType: z.enum(['movie', 'tv']).optional().describe('movie or tv (default movie)'),
+    genre: z.string().min(1).describe('Genre name, e.g. horror, sci-fi, comedy, thriller'),
+    take: z.number().int().min(1).max(20).optional().describe('Max results (default 10)'),
+  },
+  safe(async ({ mediaType, genre, take }) => {
+    const type = mediaType ?? 'movie';
+    const genreId = genreIdFor(type, genre);
+    const params = new URLSearchParams({ genre: String(genreId) });
+    const data = await api<{ results: SearchResult[] }>(
+      `/discover/${type === 'movie' ? 'movies' : 'tv'}?${params.toString()}`
+    );
+
+    const hits = (data.results ?? []).slice(0, take ?? 10).map((r) => ({
+      tmdbId: r.id,
+      mediaType: r.mediaType,
+      title: r.title ?? r.name ?? '(unknown)',
+      year: (r.releaseDate ?? r.firstAirDate ?? '').slice(0, 4) || null,
+      libraryStatus: r.mediaInfo?.status
+        ? (statusMap[r.mediaInfo.status] ?? 'unknown')
+        : 'missing',
+    }));
+
+    const missing = hits.filter((h) => h.libraryStatus === 'missing').length;
+    return envelope(
+      `${plural(hits.length, `${type} ${genre} title`)} (${missing} not in library)`,
       hits
     );
   }),

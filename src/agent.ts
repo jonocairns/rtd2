@@ -1,5 +1,9 @@
-import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
-import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import { anthropic } from '@ai-sdk/anthropic';
+import { openai } from '@ai-sdk/openai';
+import { streamText, stepCountIs, tool as aiTool, type LanguageModel } from 'ai';
+import { z } from 'zod';
+import { env } from './env.js';
+import type { CanUseTool } from './confirm.js';
 import {
   overseerr_search,
   overseerr_search_person,
@@ -12,6 +16,7 @@ import {
   overseerr_cancel_request,
   overseerr_recommend,
   overseerr_trending,
+  overseerr_discover,
   overseerr_report_issue,
 } from './tools/overseerr.js';
 import { mdblist_ratings } from './tools/mdblist.js';
@@ -26,35 +31,34 @@ import {
 import { radarr_replace_movie, radarr_delete_movie } from './tools/radarr.js';
 import { sonarr_replace, sonarr_delete_series } from './tools/sonarr.js';
 
-const mediaServer = createSdkMcpServer({
-  name: 'media-tools',
-  version: '0.1.0',
-  tools: [
-    overseerr_search,
-    overseerr_search_person,
-    overseerr_person_credits,
-    overseerr_watch_providers,
-    overseerr_get_quota,
-    overseerr_list_requests,
-    overseerr_get_request,
-    overseerr_create_request,
-    overseerr_cancel_request,
-    overseerr_recommend,
-    overseerr_trending,
-    overseerr_report_issue,
-    mdblist_ratings,
-    plex_recently_added,
-    plex_watch_history,
-    plex_unwatched,
-    plex_search,
-    plex_get_matches,
-    plex_apply_match,
-    radarr_replace_movie,
-    radarr_delete_movie,
-    sonarr_replace,
-    sonarr_delete_series,
-  ],
-});
+globalThis.AI_SDK_LOG_WARNINGS = false;
+
+const toolDescriptors = [
+  overseerr_search,
+  overseerr_search_person,
+  overseerr_person_credits,
+  overseerr_watch_providers,
+  overseerr_get_quota,
+  overseerr_list_requests,
+  overseerr_get_request,
+  overseerr_create_request,
+  overseerr_cancel_request,
+  overseerr_recommend,
+  overseerr_trending,
+  overseerr_discover,
+  overseerr_report_issue,
+  mdblist_ratings,
+  plex_recently_added,
+  plex_watch_history,
+  plex_unwatched,
+  plex_search,
+  plex_get_matches,
+  plex_apply_match,
+  radarr_replace_movie,
+  radarr_delete_movie,
+  sonarr_replace,
+  sonarr_delete_series,
+];
 
 const SYSTEM_PROMPT = `You are a media-management assistant for a user running a self-hosted Plex setup with Overseerr/Seerr for requests.
 
@@ -65,6 +69,7 @@ Tools available:
 - overseerr_watch_providers — check streaming/rent/buy availability for a title in a given region (defaults to US). Call this before recommending a request: if it's already on a streaming service the user has, surface that and ask whether they still want to download a copy.
 - overseerr_recommend — TMDB-based recommendations for a movie or TV show by TMDb id; up to 6 similar titles with library status. Use when the user asks "what's something like X".
 - overseerr_trending — trending/popular movies or TV shows with library status. Use for "what's popular?" questions.
+- overseerr_discover — discover popular movies or TV shows by genre with library status. Use for bare genre prompts like "horror", "sci-fi", "comedy", or "thriller".
 - mdblist_ratings — aggregated ratings (RT critics/audience, IMDb, Metacritic, Letterboxd, etc.) by TMDb id. Use for any score/rating question.
 - overseerr_get_quota — check remaining request quota.
 - overseerr_list_requests — list requests, optionally filtered by status.
@@ -88,6 +93,7 @@ Behaviour rules:
 - When the user clearly asks to add or request a specific title, search to get the tmdbId, then immediately call overseerr_create_request — do not stop to ask the user to confirm what they just told you. If the title is already available/pending, say so and skip the request.
 - Mutating tools (marked **MUTATING**) are gated by the harness at the call site — the user will see a confirmation prompt automatically. You do NOT need to ask the user "are you sure" before calling them; trust the gate. Pre-asking just wastes a turn.
 - When the user mentions streaming or asks where a title is available, always call overseerr_watch_providers before suggesting a download. mediaInfo from search is library state, not streaming availability — they are different things. In your reply, name the specific streaming service(s) returned (e.g. "Netflix", "Max") rather than saying "a major streaming service".
+- For bare genre prompts like "horror", "sci-fi", "comedy", or "thriller", call overseerr_discover with that genre instead of overseerr_trending.
 - For "what am I missing by X" style queries, use overseerr_search_person → overseerr_person_credits (role="directing" by default for directors) and report only titles whose libraryStatus is "missing".
 - For "what should I watch tonight", lead with plex_unwatched (sort=highest_rated) and optionally enrich the top few with mdblist_ratings. Factor in recent plex_watch_history if the user gave a mood hint. Name the specific titles you're recommending — don't say "a few strong options" without listing which.
 - For TV, ask which seasons they want before calling overseerr_create_request unless they already specified.
@@ -102,19 +108,142 @@ export interface RunOptions {
   canUseTool: CanUseTool;
 }
 
-export const MODEL = 'claude-sonnet-4-6';
+export type AgentEvent =
+  | { type: 'user' }
+  | { type: 'assistant_text_delta'; text: string }
+  | { type: 'tool_call'; name: string; input: unknown }
+  | { type: 'usage'; usage: TokenUsageLike }
+  | { type: 'assistant_done'; finalText: boolean };
 
-export function run({ prompt, canUseTool }: RunOptions) {
-  return query({
-    prompt: prompt as never,
-    options: {
-      model: MODEL,
-      maxTurns: 30,
-      systemPrompt: SYSTEM_PROMPT,
-      mcpServers: {
-        'media-tools': mediaServer,
-      },
-      canUseTool,
+interface TokenUsageLike {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheWriteTokens?: number;
+  cacheReadTokens?: number;
+}
+
+interface RuntimeTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, z.ZodTypeAny>;
+  handler: (input: unknown, extra?: unknown) => Promise<unknown>;
+  annotations?: { readOnlyHint?: boolean };
+}
+
+export const MODEL =
+  env.MODEL_NAME ??
+  (env.MODEL_PROVIDER === 'openai' ? 'gpt-5.2' : 'claude-sonnet-4-6');
+
+function model(): LanguageModel {
+  if (env.MODEL_PROVIDER === 'openai') return openai(MODEL);
+  return anthropic(MODEL);
+}
+
+function providerOptions() {
+  if (env.MODEL_PROVIDER !== 'openai') return undefined;
+  return {
+    openai: {
+      // Existing tool schemas use optional Zod fields heavily. OpenAI strict
+      // schemas reject those, so keep compatibility until schemas are
+      // normalized per provider.
+      strictJsonSchema: false,
+      store: false,
     },
-  });
+  };
+}
+
+function extractUserText(message: unknown): string | null {
+  if (typeof message !== 'object' || message === null) return null;
+  const m = message as { message?: { content?: unknown } };
+  const content = m.message?.content;
+  return typeof content === 'string' ? content : null;
+}
+
+function textFromToolResult(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return String(result);
+
+  const maybe = result as { content?: unknown };
+  if (Array.isArray(maybe.content)) {
+    return maybe.content
+      .map((part) => {
+        if (typeof part === 'object' && part !== null && 'text' in part) {
+          return String((part as { text: unknown }).text);
+        }
+        return JSON.stringify(part);
+      })
+      .join('\n');
+  }
+
+  return JSON.stringify(result, null, 2);
+}
+
+function toAiTools(canUseTool: CanUseTool) {
+  return Object.fromEntries(
+    (toolDescriptors as RuntimeTool[]).map((runtimeTool) => [
+      runtimeTool.name,
+      aiTool({
+        description: runtimeTool.description,
+        inputSchema: z.object(runtimeTool.inputSchema),
+        execute: async (input) => {
+          if (!runtimeTool.annotations?.readOnlyHint) {
+            const decision = await canUseTool(runtimeTool.name, input);
+            if (decision.behavior === 'deny') return decision.message;
+          }
+          return textFromToolResult(await runtimeTool.handler(input));
+        },
+      }),
+    ])
+  );
+}
+
+export async function* run({ prompt, canUseTool }: RunOptions): AsyncIterable<AgentEvent> {
+  const messages: unknown[] = [];
+  const tools = toAiTools(canUseTool);
+
+  for await (const input of prompt) {
+    const userText = extractUserText(input);
+    if (!userText) continue;
+
+    yield { type: 'user' };
+    messages.push({ role: 'user', content: userText });
+
+    let sawText = false;
+    const result = streamText({
+      model: model(),
+      system: SYSTEM_PROMPT,
+      messages: messages as never,
+      tools,
+      providerOptions: providerOptions(),
+      stopWhen: stepCountIs(30),
+    });
+
+    for await (const part of result.fullStream) {
+      switch (part.type) {
+        case 'text-delta':
+          sawText = true;
+          yield { type: 'assistant_text_delta', text: part.text };
+          break;
+        case 'tool-call':
+          yield { type: 'tool_call', name: String(part.toolName), input: part.input };
+          break;
+        case 'finish-step':
+          yield {
+            type: 'usage',
+            usage: {
+              inputTokens: part.usage.inputTokens,
+              outputTokens: part.usage.outputTokens,
+              cacheWriteTokens: part.usage.inputTokenDetails.cacheWriteTokens,
+              cacheReadTokens: part.usage.inputTokenDetails.cacheReadTokens,
+            },
+          };
+          break;
+        case 'error':
+          throw part.error instanceof Error ? part.error : new Error(String(part.error));
+      }
+    }
+
+    const response = await result.response;
+    messages.push(...response.messages);
+    yield { type: 'assistant_done', finalText: sawText };
+  }
 }

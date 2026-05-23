@@ -1,4 +1,4 @@
-import { tool } from '@anthropic-ai/claude-agent-sdk';
+import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { safe } from './errors.js';

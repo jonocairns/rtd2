@@ -8,7 +8,10 @@ const optionalString = z.preprocess(emptyAsUndefined, z.string().min(1).optional
 const optionalUrl = z.preprocess(emptyAsUndefined, z.string().url().optional());
 
 const schema = z.object({
-  ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY is required'),
+  MODEL_PROVIDER: z.enum(['openai', 'anthropic']).optional(),
+  MODEL_NAME: optionalString,
+  OPENAI_API_KEY: optionalString,
+  ANTHROPIC_API_KEY: optionalString,
   OVERSEERR_URL: z.string().url('OVERSEERR_URL must be a valid URL'),
   OVERSEERR_API_KEY: z.string().min(1, 'OVERSEERR_API_KEY is required'),
 
@@ -20,6 +23,22 @@ const schema = z.object({
   RADARR_API_KEY: optionalString,
   SONARR_URL: optionalUrl,
   SONARR_API_KEY: optionalString,
+}).superRefine((data, ctx) => {
+  const provider = data.MODEL_PROVIDER ?? (data.OPENAI_API_KEY ? 'openai' : 'anthropic');
+  if (provider === 'openai' && !data.OPENAI_API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['OPENAI_API_KEY'],
+      message: 'OPENAI_API_KEY is required when MODEL_PROVIDER=openai',
+    });
+  }
+  if (provider === 'anthropic' && !data.ANTHROPIC_API_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ANTHROPIC_API_KEY'],
+      message: 'ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic',
+    });
+  }
 });
 
 const parsed = schema.safeParse(process.env);
@@ -37,6 +56,7 @@ const data = parsed.data;
 
 export const env = {
   ...data,
+  MODEL_PROVIDER: data.MODEL_PROVIDER ?? (data.OPENAI_API_KEY ? 'openai' : 'anthropic'),
   OVERSEERR_URL: data.OVERSEERR_URL.replace(/\/$/, ''),
   PLEX_URL: data.PLEX_URL?.replace(/\/$/, ''),
   RADARR_URL: data.RADARR_URL?.replace(/\/$/, ''),

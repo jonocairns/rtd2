@@ -56,11 +56,11 @@ export function installFetchMock(routes: MockRoute[]): {
 
 // Tool handler signatures treat optional fields as `T | undefined`-required,
 // which is annoying in tests. This helper casts at the call site.
-export function invoke<T extends { handler: (args: never, extra: unknown) => unknown }>(
+export function invoke<T extends { handler: (args: never, extra: unknown) => Promise<unknown> }>(
   tool: T,
   args: Record<string, unknown>
-): ReturnType<T['handler']> {
-  return tool.handler(args as never, undefined) as ReturnType<T['handler']>;
+): Promise<{ content: unknown[]; isError?: true }> {
+  return tool.handler(args as never, undefined) as Promise<{ content: unknown[]; isError?: true }>;
 }
 
 export function route(

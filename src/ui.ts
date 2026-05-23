@@ -127,12 +127,13 @@ export function error(msg: string) {
   console.error(`${colors.red}✗${colors.reset} ${msg}`);
 }
 
-// Pricing for claude-sonnet-4-6 (USD per million tokens)
+// Approximate pricing for the default OpenAI model (USD per million tokens).
+// This is only a local display estimate; evals resolve model-specific rates.
 const PRICE = {
-  input: 3.0,
-  output: 15.0,
-  cacheWrite: 3.75,
-  cacheRead: 0.3,
+  input: 1.75,
+  output: 14.0,
+  cacheWrite: 1.75,
+  cacheRead: 0.175,
 };
 
 export interface TokenUsage {

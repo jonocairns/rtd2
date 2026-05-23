@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { overseerr_create_request, overseerr_search } from './overseerr.js';
+import { overseerr_create_request, overseerr_discover, overseerr_search } from './overseerr.js';
 import { installFetchMock, invoke, route } from './_testing.js';
 
 // Overseerr writes go through a CSRF dance: GET /auth/me for cookies, then the
@@ -81,5 +81,58 @@ describe('overseerr_search', () => {
       year: '1999',
       libraryStatus: 'available',
     });
+  });
+});
+
+describe('overseerr_discover', () => {
+  it('maps genre names to discover filters and returns library status', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/api/v1/discover/movies', {
+        json: {
+          results: [
+            {
+              id: 348,
+              mediaType: 'movie',
+              title: 'Alien',
+              releaseDate: '1979-05-25',
+              mediaInfo: { status: 5 },
+            },
+            {
+              id: 111,
+              mediaType: 'movie',
+              title: 'Missing Horror',
+              releaseDate: '2024-10-01',
+            },
+          ],
+        },
+      }),
+    ]);
+
+    const result = await invoke(overseerr_discover, { genre: 'horror' });
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/api/v1/discover/movies');
+    expect(url.searchParams.get('genre')).toBe('27');
+
+    const text = (result.content[0] as { text: string }).text;
+    const parsed = JSON.parse(text);
+    expect(parsed.summary).toMatch(/2 movie horror titles/);
+    expect(parsed.items[0]).toMatchObject({
+      tmdbId: 348,
+      title: 'Alien',
+      libraryStatus: 'available',
+    });
+    expect(parsed.items[1].libraryStatus).toBe('missing');
+  });
+
+  it('supports sci-fi aliases for TV discover', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/api/v1/discover/tv', { json: { results: [] } }),
+    ]);
+
+    await invoke(overseerr_discover, { mediaType: 'tv', genre: 'sci fi' });
+
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/api/v1/discover/tv');
+    expect(url.searchParams.get('genre')).toBe('10765');
   });
 });

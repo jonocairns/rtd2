@@ -1,9 +1,10 @@
-// Load .env first so real values (especially ANTHROPIC_API_KEY for evals)
+// Load .env first so real values (especially model API keys for evals)
 // survive — then ??= fills in the rest for unit tests where backend creds
 // aren't needed.
 import 'dotenv/config';
 
 process.env.ANTHROPIC_API_KEY ??= 'test-anthropic-key';
+process.env.OPENAI_API_KEY ??= 'test-openai-key';
 process.env.OVERSEERR_URL ??= 'http://overseerr.test';
 process.env.OVERSEERR_API_KEY ??= 'test-overseerr-key';
 process.env.PLEX_URL ??= 'http://plex.test';

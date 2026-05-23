@@ -49,7 +49,7 @@ Practical shape: a small in-memory map keyed by `${tool}:${primaryId}` with a TT
 
 ### 3. `isError: true` instead of throws ✅
 
-**Problem.** `radarr.ts`, `sonarr.ts`, `plex.ts`, `overseerr.ts` all `throw new Error(...)` on API failures. The SDK surfaces those as exceptions, which can derail the agent loop instead of teaching it.
+**Problem.** `radarr.ts`, `sonarr.ts`, `plex.ts`, `overseerr.ts` all `throw new Error(...)` on API failures. The model runtime can surface those as exceptions, which can derail the agent loop instead of teaching it.
 
 **Fix.** Convert API failures to structured returns:
 
@@ -110,7 +110,7 @@ Composio and Zylos both call this out: explicit contracts beat raw dumps. The `n
 **Implemented.**
 
 - **Unit:** vitest. Mocked-fetch helper at [src/tools/_testing.ts](src/tools/_testing.ts). Tests at [src/tools/*.test.ts](src/tools/) cover the `safe()` wrapper, the four mutating tools (call order, keepFile branches, error paths), and the envelope shape on a couple of read tools. 23 tests, runs in ~300ms. `pnpm test`.
-- **Eval:** [evalite](https://www.npmjs.com/package/evalite) — TS-native eval runner with built-in run history (SQLite at `node_modules/.evalite/cache.sqlite`) and a local web UI for diffing across runs. Per-run cost is shown in a column, with rates pulled from [LiteLLM's pricing catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) at startup so changing the model in [agent.ts](src/agent.ts) updates costs automatically; falls back to hardcoded Sonnet 4.x rates (marked with a `*`) when offline. [evals/_runner.ts](evals/_runner.ts) installs a host-aware fetch interceptor — backend hosts (overseerr.test, plex.test, radarr.test, sonarr.test, mdblist.com) are mocked; everything else (notably api.anthropic.com) passes through so the real Claude model is exercised. Reusable scorers in [evals/_scorers.ts](evals/_scorers.ts) (`containsTools`, `toolOrder`, `finalTextIncludes`, `toolInputMatches`). Five scenarios in [evals/](evals/): search-and-request, filmography-gap, issue-and-regrab, streaming-availability, tonight-watch. Run `pnpm eval` once (requires a real `ANTHROPIC_API_KEY`; costs API credits per run), `pnpm eval:ui` to see the run-history UI.
+- **Eval:** [evalite](https://www.npmjs.com/package/evalite) — TS-native eval runner with built-in run history (SQLite at `node_modules/.evalite/cache.sqlite`) and a local web UI for diffing across runs. Per-run cost is shown in a column, with rates pulled from [LiteLLM's pricing catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) at startup so changing the model in [agent.ts](src/agent.ts) updates costs automatically. [evals/_runner.ts](evals/_runner.ts) installs a host-aware fetch interceptor — backend hosts (overseerr.test, plex.test, radarr.test, sonarr.test, mdblist.com) are mocked; model API hosts pass through so the configured model is exercised. Reusable scorers in [evals/_scorers.ts](evals/_scorers.ts) (`containsTools`, `toolOrder`, `finalTextIncludes`, `toolInputMatches`). Five scenarios in [evals/](evals/): search-and-request, filmography-gap, issue-and-regrab, streaming-availability, tonight-watch. Run `pnpm eval` once (requires a real model provider API key; costs API credits per run), `pnpm eval:ui` to see the run-history UI.
 
 ### 8. Self-check after destructive ops (optional)
 

@@ -1,5 +1,5 @@
 import readline from 'node:readline';
-import { run } from './agent.js';
+import { run, type AgentEvent } from './agent.js';
 import { createConfirmGate } from './confirm.js';
 import type { AuditLog } from './audit.js';
 import {
@@ -15,7 +15,7 @@ import {
   type TokenUsage,
 } from './ui.js';
 
-const TOOL_COUNT = 21;
+const TOOL_COUNT = 24;
 
 interface PromptController {
   prompt: AsyncIterable<unknown>;
@@ -79,11 +79,22 @@ export async function startRepl({
 
   const session: TokenUsage = emptyUsage();
   let turn: TokenUsage = emptyUsage();
+  let pendingText = '';
 
   try {
-    for await (const message of run({ prompt: userPrompt.prompt, canUseTool })) {
-      if ((message as { type?: string }).type === 'user') turn = emptyUsage();
-      const result = handleMessage(message, spinner, audit);
+    for await (const event of run({ prompt: userPrompt.prompt, canUseTool })) {
+      if (event.type === 'user') {
+        turn = emptyUsage();
+        pendingText = '';
+      }
+      const result = handleEvent(event, spinner, audit, {
+        get pendingText() {
+          return pendingText;
+        },
+        set pendingText(text: string) {
+          pendingText = text;
+        },
+      });
       if (result.usage) {
         turn = addUsage(turn, result.usage);
         Object.assign(session, addUsage(session, result.usage));
@@ -107,64 +118,55 @@ interface MessageResult {
   finalText: boolean;
 }
 
-function handleMessage(message: unknown, spinner: Spinner, audit: AuditLog): MessageResult {
+interface TextBuffer {
+  pendingText: string;
+}
+
+function handleEvent(
+  event: AgentEvent,
+  spinner: Spinner,
+  audit: AuditLog,
+  textBuffer: TextBuffer
+): MessageResult {
   const none: MessageResult = { usage: null, finalText: false };
-  if (typeof message !== 'object' || message === null) return none;
-  const m = message as {
-    type?: string;
-    message?: {
-      content?: unknown;
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-      };
-    };
-  };
 
-  if (m.type !== 'assistant') return none;
-  // Don't stop the spinner here — it's been running since the user submitted.
-  // We stop it inline, just before rendering each block, so there's no gap.
-
-  const raw = m.message?.usage;
-  const usage: TokenUsage | null = raw
-    ? {
-        inputTokens: raw.input_tokens ?? 0,
-        outputTokens: raw.output_tokens ?? 0,
-        cacheWriteTokens: raw.cache_creation_input_tokens ?? 0,
-        cacheReadTokens: raw.cache_read_input_tokens ?? 0,
+  switch (event.type) {
+    case 'assistant_text_delta':
+      textBuffer.pendingText += event.text;
+      return none;
+    case 'tool_call':
+      spinner.stop();
+      if (textBuffer.pendingText.trim() !== '') {
+        console.log(renderMarkdown(textBuffer.pendingText));
+        textBuffer.pendingText = '';
       }
-    : null;
-
-  const content = m.message?.content;
-  if (!Array.isArray(content)) return { usage, finalText: false };
-
-  let hasText = false;
-  let hasTool = false;
-
-  for (const block of content) {
-    if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') {
-      spinner.stop();
-      console.log(renderMarkdown(block.text));
-      hasText = true;
-    } else if (block?.type === 'tool_use' && typeof block.name === 'string') {
-      spinner.stop();
-      const displayName = block.name.replace(/^mcp__[^_]+__/, '');
-      toolCall(displayName, JSON.stringify(block.input ?? {}));
+      toolCall(event.name, JSON.stringify(event.input ?? {}));
       audit.append({
         type: 'tool_call',
         ts: new Date().toISOString(),
-        tool: displayName,
-        args: block.input ?? {},
+        tool: event.name,
+        args: event.input ?? {},
       });
-      hasTool = true;
-      spinner.start();
-    }
+      spinner.start('processing');
+      return none;
+    case 'usage':
+      return {
+        usage: {
+          inputTokens: event.usage.inputTokens ?? 0,
+          outputTokens: event.usage.outputTokens ?? 0,
+          cacheWriteTokens: event.usage.cacheWriteTokens ?? 0,
+          cacheReadTokens: event.usage.cacheReadTokens ?? 0,
+        },
+        finalText: false,
+      };
+    case 'assistant_done':
+      spinner.stop();
+      if (textBuffer.pendingText.trim() !== '') {
+        console.log(renderMarkdown(textBuffer.pendingText));
+        textBuffer.pendingText = '';
+      }
+      return { usage: null, finalText: true };
+    case 'user':
+      return none;
   }
-
-  // Text was shown but more tool calls are coming in the same message.
-  if (hasText && hasTool) spinner.restart('processing');
-
-  return { usage, finalText: hasText && !hasTool };
 }
