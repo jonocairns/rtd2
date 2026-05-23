@@ -26,7 +26,9 @@ async function sonarrApi<T = unknown>(path: string, init?: RequestInit): Promise
     throw new Error(`Sonarr ${res.status} ${res.statusText} at ${path}: ${body.slice(0, 300)}`);
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const text = await res.text();
+  if (!text.trim()) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export async function validateConnection(): Promise<void> {
@@ -103,6 +105,76 @@ export async function resolveReplace(input: {
   );
   return lines;
 }
+
+export async function resolveDeleteSeries(input: {
+  tmdbId: number;
+  deleteFiles?: boolean;
+}): Promise<string[]> {
+  const tvdbId = await tmdbToTvdb(input.tmdbId);
+  const seriesList = await sonarrApi<SonarrSeries[]>(`/series?tvdbId=${tvdbId}`);
+  const series = seriesList[0];
+  if (!series) {
+    return [`Delete from Sonarr: TMDb ${input.tmdbId} (not currently in Sonarr)`];
+  }
+
+  const lines = [`Delete from Sonarr: ${series.title}`];
+  lines.push(
+    input.deleteFiles
+      ? `  Action: remove from Sonarr + delete all files from disk`
+      : `  Action: remove from Sonarr (keep files on disk)`
+  );
+  return lines;
+}
+
+export const sonarr_delete_series = tool(
+  'sonarr_delete_series',
+  'Remove a series from Sonarr entirely without triggering a re-download. Optionally deletes all episode files from disk. Use when you want to fully remove a show from Sonarr. Requires the TMDb ID — call overseerr_search first. **MUTATING**.',
+  {
+    tmdbId: z.number().int().describe('TMDb ID of the series'),
+    deleteFiles: z
+      .boolean()
+      .optional()
+      .describe('If true, also delete all episode files from disk. Default false (removes from Sonarr but keeps files).'),
+    addImportListExclusion: z
+      .boolean()
+      .optional()
+      .describe('If true, add an import list exclusion so Sonarr will not re-add the series automatically. Default false.'),
+  },
+  safe(async ({ tmdbId, deleteFiles, addImportListExclusion }) => {
+    const tvdbId = await tmdbToTvdb(tmdbId);
+    const seriesList = await sonarrApi<SonarrSeries[]>(`/series?tvdbId=${tvdbId}`);
+    const series = seriesList[0];
+    if (!series) {
+      throw new Error(`No Sonarr series found for TVDB ID ${tvdbId} (TMDb ${tmdbId}).`);
+    }
+
+    const params = new URLSearchParams({
+      deleteFiles: String(deleteFiles ?? false),
+      addImportListExclusion: String(addImportListExclusion ?? false),
+    });
+
+    await sonarrApi(`/series/${series.id}?${params}`, { method: 'DELETE' });
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              sonarrId: series.id,
+              title: series.title,
+              deletedFromSonarr: true,
+              filesDeletedFromDisk: deleteFiles ?? false,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }),
+  { annotations: { readOnlyHint: false } }
+);
 
 export const sonarr_replace = tool(
   'sonarr_replace',

@@ -17,19 +17,44 @@ import {
 
 const TOOL_COUNT = 21;
 
-async function* userInput(rl: readline.Interface, spinner: Spinner) {
-  while (true) {
-    spinner.stop();
-    const line: string = await new Promise((resolve) => rl.question(PROMPT, resolve));
-    const trimmed = line.trim();
-    if (trimmed === '') continue;
-    if (trimmed === 'exit' || trimmed === 'quit') return;
-    spinner.start();
-    yield {
-      type: 'user' as const,
-      message: { role: 'user' as const, content: trimmed },
-    };
+interface PromptController {
+  prompt: AsyncIterable<unknown>;
+  allowNextInput: () => void;
+}
+
+function createUserPrompt(rl: readline.Interface, spinner: Spinner): PromptController {
+  let readyForInput = Promise.resolve();
+  let releaseNextInput: (() => void) | null = null;
+
+  async function* prompt() {
+    while (true) {
+      await readyForInput;
+      spinner.stop();
+
+      const line: string = await new Promise((resolve) => rl.question(PROMPT, resolve));
+      const trimmed = line.trim();
+      if (trimmed === '') continue;
+      if (trimmed === 'exit' || trimmed === 'quit') return;
+
+      readyForInput = new Promise((resolve) => {
+        releaseNextInput = resolve;
+      });
+      spinner.start();
+      yield {
+        type: 'user' as const,
+        message: { role: 'user' as const, content: trimmed },
+      };
+    }
   }
+
+  return {
+    prompt: prompt(),
+    allowNextInput: () => {
+      const release = releaseNextInput;
+      releaseNextInput = null;
+      release?.();
+    },
+  };
 }
 
 export async function startRepl({
@@ -50,19 +75,23 @@ export async function startRepl({
 
   const spinner = new Spinner();
   const canUseTool = createConfirmGate({ rl, spinner, yolo, audit });
+  const userPrompt = createUserPrompt(rl, spinner);
 
   const session: TokenUsage = emptyUsage();
   let turn: TokenUsage = emptyUsage();
 
   try {
-    for await (const message of run({ prompt: userInput(rl, spinner), canUseTool })) {
+    for await (const message of run({ prompt: userPrompt.prompt, canUseTool })) {
       if ((message as { type?: string }).type === 'user') turn = emptyUsage();
       const result = handleMessage(message, spinner, audit);
       if (result.usage) {
         turn = addUsage(turn, result.usage);
         Object.assign(session, addUsage(session, result.usage));
       }
-      if (result.finalText) usageLine(turn, session);
+      if (result.finalText) {
+        usageLine(turn, session);
+        userPrompt.allowNextInput();
+      }
     }
   } catch (e) {
     spinner.stop();

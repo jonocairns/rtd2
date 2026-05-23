@@ -33,7 +33,9 @@
       "mcp__media-tools__plex_get_matches",
       "mcp__media-tools__plex_apply_match",
       "mcp__media-tools__radarr_replace_movie",
-      "mcp__media-tools__sonarr_replace"
+      "mcp__media-tools__sonarr_replace",
+      "mcp__media-tools__radarr_delete_movie",
+      "mcp__media-tools__sonarr_delete_series"
     ]
   }
 }

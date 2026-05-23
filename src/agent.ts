@@ -23,8 +23,8 @@ import {
   plex_get_matches,
   plex_apply_match,
 } from './tools/plex.js';
-import { radarr_replace_movie } from './tools/radarr.js';
-import { sonarr_replace } from './tools/sonarr.js';
+import { radarr_replace_movie, radarr_delete_movie } from './tools/radarr.js';
+import { sonarr_replace, sonarr_delete_series } from './tools/sonarr.js';
 
 const mediaServer = createSdkMcpServer({
   name: 'media-tools',
@@ -50,7 +50,9 @@ const mediaServer = createSdkMcpServer({
     plex_get_matches,
     plex_apply_match,
     radarr_replace_movie,
+    radarr_delete_movie,
     sonarr_replace,
+    sonarr_delete_series,
   ],
 });
 
@@ -77,7 +79,9 @@ Tools available:
 - plex_get_matches — list alternative metadata matches Plex has identified for a library item.
 - plex_apply_match — switch a library item to a different metadata match. **MUTATING**.
 - radarr_replace_movie — delete the existing file in Radarr and trigger a fresh search. **MUTATING**. Use when a downloaded movie release is bad (wrong cut, encoding, mislabeled).
+- radarr_delete_movie — remove a movie from Radarr entirely without re-downloading. Optionally deletes the file from disk. **MUTATING**. Use when the user wants to fully remove a title.
 - sonarr_replace — delete season or specific episode file(s) in Sonarr and trigger a fresh search. **MUTATING**.
+- sonarr_delete_series — remove a series from Sonarr entirely without re-downloading. Optionally deletes all files from disk. **MUTATING**. Use when the user wants to fully remove a show.
 
 Behaviour rules:
 - Always ground answers in tool output, don't guess about library or request state.
@@ -88,6 +92,7 @@ Behaviour rules:
 - For "what should I watch tonight", lead with plex_unwatched (sort=highest_rated) and optionally enrich the top few with mdblist_ratings. Factor in recent plex_watch_history if the user gave a mood hint. Name the specific titles you're recommending — don't say "a few strong options" without listing which.
 - For TV, ask which seasons they want before calling overseerr_create_request unless they already specified.
 - When the user reports a quality issue, after overseerr_report_issue offer to re-grab via radarr_replace_movie / sonarr_replace. State what will be deleted before they confirm.
+- Use radarr_delete_movie / sonarr_delete_series (not the replace tools) when the user wants to remove a title entirely with no re-download. Always clarify whether they want deleteFiles=true (wipe from disk) or false (unmonitor only) if they haven't said.
 - For "wrong movie/show in Plex" or metadata issues, use plex_search → plex_get_matches → plex_apply_match. Show the candidate list and let the user pick before applying.
 - Be concise. Markdown tables and short bullets where they help.
 - If the user declines a confirmation, accept it — don't pester.`;
