@@ -48,7 +48,7 @@ pnpm start        # run compiled
 pnpm typecheck    # type-check src + tests + evals
 pnpm test         # run unit tests (vitest, mocked fetch)
 pnpm eval         # run scripted-conversation evals once (hits real Claude, costs API credits)
-pnpm eval:ui      # serve the evalite UI to browse run history + diffs
+pnpm eval:ui      # serve the evalite UI against existing run history (no new run, no API spend)
 ```
 
 Evals run via [evalite](https://www.npmjs.com/package/evalite) and need a real `ANTHROPIC_API_KEY` in `.env` or the shell. The runner mocks Plex/Overseerr/Radarr/Sonarr but lets the actual Claude API through, so each scenario is a genuine model invocation. Run history is persisted at `node_modules/.evalite/cache.sqlite`.

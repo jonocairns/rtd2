@@ -9,6 +9,7 @@ dist/
 logs/
 last-run.json
 seen.json
+evals/db/
 
 # nix
 result

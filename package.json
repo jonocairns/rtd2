@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "evalite run",
-    "eval:ui": "evalite serve"
+    "eval:ui": "tsx evals/serve-ui.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.0",
@@ -25,8 +25,10 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/marked-terminal": "^6.1.1",
     "@types/node": "^22.0.0",
+    "better-sqlite3": "^12.10.0",
     "evalite": "^0.19.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0",

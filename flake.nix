@@ -14,12 +14,14 @@
           packages = with pkgs; [
             nodejs_22
             pnpm
+            gh
           ];
 
           shellHook = ''
             echo "media-agent dev shell"
             echo "  node $(node --version)"
             echo "  pnpm $(pnpm --version)"
+            echo "  gh   $(gh --version | head -1 | cut -d' ' -f3)"
           '';
         };
       });

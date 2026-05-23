@@ -4,15 +4,13 @@ import { run } from '../src/agent.js';
 import type { MockRoute } from '../src/tools/_testing.js';
 import { addUsage, emptyUsage, type Usage } from './_cost.js';
 
-// Hosts that the eval treats as "the backend." Requests to these get routed
-// through the mock; anything else (notably api.anthropic.com) is passed
-// through to the real fetch so the real Claude model is exercised.
-const BACKEND_HOSTS = new Set([
-  'overseerr.test',
-  'plex.test',
-  'radarr.test',
-  'sonarr.test',
-  'mdblist.com',
+// Hosts that pass through to real fetch — Claude API + a couple of read-only
+// info endpoints. Everything else MUST match a mock route or the call throws.
+// This is a safety allowlist: we never want the eval to hit a real Plex /
+// Overseerr / Radarr / Sonarr even if env URLs accidentally point there.
+const PASS_THROUGH_HOSTS = new Set([
+  'api.anthropic.com',
+  'raw.githubusercontent.com', // LiteLLM pricing fetch
 ]);
 
 export interface ScenarioToolCall {
@@ -59,7 +57,7 @@ export async function runScenario({
       return originalFetch(input as never, init);
     }
 
-    if (!BACKEND_HOSTS.has(hostname)) {
+    if (PASS_THROUGH_HOSTS.has(hostname)) {
       return originalFetch(input as never, init);
     }
 
@@ -68,7 +66,12 @@ export async function runScenario({
 
     const matched = routes.find((r) => r.match(url, init));
     if (!matched) {
-      throw new Error(`Eval: no mock route for ${method} ${url}`);
+      // Fail loudly rather than fall through to real fetch. This is the safety
+      // net that prevents evals from mutating live services if env config is
+      // misconfigured.
+      throw new Error(
+        `Eval: blocked unmocked ${method} ${url} (no route matched, host not in PASS_THROUGH_HOSTS)`
+      );
     }
 
     const status = matched.status ?? 200;
