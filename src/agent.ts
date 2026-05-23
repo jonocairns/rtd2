@@ -1,74 +1,23 @@
-import { anthropic } from '@ai-sdk/anthropic';
-import { openai } from '@ai-sdk/openai';
-import { streamText, stepCountIs, tool as aiTool, type LanguageModel } from 'ai';
-import { z } from 'zod';
-import { env } from './env.js';
+import { streamText, stepCountIs } from 'ai';
 import type { CanUseTool } from './confirm.js';
-import {
-  overseerr_search,
-  overseerr_search_person,
-  overseerr_person_credits,
-  overseerr_watch_providers,
-  overseerr_get_quota,
-  overseerr_list_requests,
-  overseerr_get_request,
-  overseerr_create_request,
-  overseerr_cancel_request,
-  overseerr_delete_request,
-  overseerr_approve_request,
-  overseerr_reject_request,
-  overseerr_recommend,
-  overseerr_trending,
-  overseerr_discover,
-  overseerr_report_issue,
-} from './tools/overseerr.js';
-import { mdblist_ratings } from './tools/mdblist.js';
-import {
-  plex_recently_added,
-  plex_watch_history,
-  plex_unwatched,
-  plex_search,
-  plex_get_matches,
-  plex_apply_match,
-} from './tools/plex.js';
-import { radarr_replace_movie, radarr_delete_movie } from './tools/radarr.js';
-import { sonarr_replace, sonarr_delete_series } from './tools/sonarr.js';
+import { media_investigate } from './investigator.js';
+import { model, MODEL, providerOptions } from './model.js';
+import { baseToolDescriptors } from './tool-registry.js';
+import { toAiTools, type RuntimeTool } from './tool-runtime.js';
 
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
+export { MODEL } from './model.js';
+
 const toolDescriptors = [
-  overseerr_search,
-  overseerr_search_person,
-  overseerr_person_credits,
-  overseerr_watch_providers,
-  overseerr_get_quota,
-  overseerr_list_requests,
-  overseerr_get_request,
-  overseerr_create_request,
-  overseerr_cancel_request,
-  overseerr_delete_request,
-  overseerr_approve_request,
-  overseerr_reject_request,
-  overseerr_recommend,
-  overseerr_trending,
-  overseerr_discover,
-  overseerr_report_issue,
-  mdblist_ratings,
-  plex_recently_added,
-  plex_watch_history,
-  plex_unwatched,
-  plex_search,
-  plex_get_matches,
-  plex_apply_match,
-  radarr_replace_movie,
-  radarr_delete_movie,
-  sonarr_replace,
-  sonarr_delete_series,
+  media_investigate as RuntimeTool,
+  ...baseToolDescriptors,
 ];
 
 const SYSTEM_PROMPT = `You are a media-management assistant for a user running a self-hosted Plex setup with Overseerr/Seerr for requests.
 
 Tools available:
+- media_investigate — read-only investigation sub-agent for ambiguous or multi-step tasks. It can call read-only tools and returns grounded facts, proposed actions, and questions. Use it when the user asks broad questions like request triage, library investigation, "what needs attention?", or unclear repair/discovery tasks. Do not use it for simple one-tool lookups.
 - overseerr_search — look up a title by name; returns up to 5 candidates with TMDb id, year, and library status. Use this whenever the user names a title.
 - overseerr_search_person — look up a person (director, actor, writer) by name; returns up to 5 candidates with TMDb person id.
 - overseerr_person_credits — list a person's filmography with library status for each title. Optional role filter: "directing" | "writing" | "acting" | "all". Use this for gap-finder queries like "what Kubrick films am I missing" — search the person first, then call this with role="directing".
@@ -76,7 +25,7 @@ Tools available:
 - overseerr_recommend — TMDB-based recommendations for a movie or TV show by TMDb id; up to 6 similar titles with library status. Use when the user asks "what's something like X".
 - overseerr_trending — trending/popular movies or TV shows with library status. Use for "what's popular?" questions.
 - overseerr_discover — discover popular movies or TV shows by genre with library status. Use for bare genre prompts like "horror", "sci-fi", "comedy", or "thriller".
-- mdblist_ratings — aggregated ratings (RT critics/audience, IMDb, Metacritic, Letterboxd, etc.) by TMDb id. Use for any score/rating question.
+- mdblist_ratings — aggregated ratings (RT critics/audience, IMDb, Metacritic, Letterboxd, etc.) plus a global streamingProviders hint for one or many TMDb ids in a single batched call. Always pass every title you want rated in one call, not one call per title. Use the streamingProviders hint as a fast first pass; only fall back to overseerr_watch_providers when you need region-specific availability or a flatrate/rent/buy split.
 - overseerr_get_quota — check remaining request quota.
 - overseerr_list_requests — list requests, optionally filtered by status.
 - overseerr_get_request — detail for one request by id.
@@ -99,6 +48,7 @@ Tools available:
 
 Behaviour rules:
 - Always ground answers in tool output, don't guess about library or request state.
+- For ambiguous or multi-step investigation, call media_investigate first. Treat its proposed mutating actions as recommendations only; if you decide to perform one, call the mutating tool yourself so the normal confirmation gate handles it.
 - When the user clearly asks to add or request a specific title, search to get the tmdbId, then immediately call overseerr_create_request — do not stop to ask the user to confirm what they just told you. If the title is already available/pending, say so and skip the request.
 - Mutating tools (marked **MUTATING**) are gated by the harness at the call site — the user will see a confirmation prompt automatically. You do NOT need to ask the user "are you sure" before calling them; trust the gate. Pre-asking just wastes a turn.
 - When the user mentions streaming or asks where a title is available, always call overseerr_watch_providers before suggesting a download. mediaInfo from search is library state, not streaming availability — they are different things. In your reply, name the specific streaming service(s) returned (e.g. "Netflix", "Max") rather than saying "a major streaming service".
@@ -110,6 +60,8 @@ Behaviour rules:
 - Use radarr_delete_movie / sonarr_delete_series (not the replace tools) when the user wants to remove a title entirely with no re-download. Always clarify whether they want deleteFiles=true (wipe from disk) or false (unmonitor only) if they haven't said.
 - For "wrong movie/show in Plex" or metadata issues, use plex_search → plex_get_matches → plex_apply_match. Show the candidate list and let the user pick before applying.
 - Be concise. Markdown tables and short bullets where they help.
+- Format responses for a terminal: prefer flat bullets, short sections, and compact tables. Avoid nested bullet lists unless absolutely necessary.
+- Do not put blank lines between every bullet item. For long lists, group by heading and show the most important items first with a count of additional items.
 - If the user declines a confirmation, accept it — don't pester.`;
 
 export interface RunOptions {
@@ -131,36 +83,6 @@ interface TokenUsageLike {
   cacheReadTokens?: number;
 }
 
-interface RuntimeTool {
-  name: string;
-  description: string;
-  inputSchema: Record<string, z.ZodTypeAny>;
-  handler: (input: unknown, extra?: unknown) => Promise<unknown>;
-  annotations?: { readOnlyHint?: boolean };
-}
-
-export const MODEL =
-  env.MODEL_NAME ??
-  (env.MODEL_PROVIDER === 'openai' ? 'gpt-5.2' : 'claude-sonnet-4-6');
-
-function model(): LanguageModel {
-  if (env.MODEL_PROVIDER === 'openai') return openai(MODEL);
-  return anthropic(MODEL);
-}
-
-function providerOptions() {
-  if (env.MODEL_PROVIDER !== 'openai') return undefined;
-  return {
-    openai: {
-      // Existing tool schemas use optional Zod fields heavily. OpenAI strict
-      // schemas reject those, so keep compatibility until schemas are
-      // normalized per provider.
-      strictJsonSchema: false,
-      store: false,
-    },
-  };
-}
-
 function extractUserText(message: unknown): string | null {
   if (typeof message !== 'object' || message === null) return null;
   const m = message as { message?: { content?: unknown } };
@@ -168,46 +90,9 @@ function extractUserText(message: unknown): string | null {
   return typeof content === 'string' ? content : null;
 }
 
-function textFromToolResult(result: unknown): string {
-  if (typeof result !== 'object' || result === null) return String(result);
-
-  const maybe = result as { content?: unknown };
-  if (Array.isArray(maybe.content)) {
-    return maybe.content
-      .map((part) => {
-        if (typeof part === 'object' && part !== null && 'text' in part) {
-          return String((part as { text: unknown }).text);
-        }
-        return JSON.stringify(part);
-      })
-      .join('\n');
-  }
-
-  return JSON.stringify(result, null, 2);
-}
-
-function toAiTools(canUseTool: CanUseTool) {
-  return Object.fromEntries(
-    (toolDescriptors as RuntimeTool[]).map((runtimeTool) => [
-      runtimeTool.name,
-      aiTool({
-        description: runtimeTool.description,
-        inputSchema: z.object(runtimeTool.inputSchema),
-        execute: async (input) => {
-          if (!runtimeTool.annotations?.readOnlyHint) {
-            const decision = await canUseTool(runtimeTool.name, input);
-            if (decision.behavior === 'deny') return decision.message;
-          }
-          return textFromToolResult(await runtimeTool.handler(input));
-        },
-      }),
-    ])
-  );
-}
-
 export async function* run({ prompt, canUseTool }: RunOptions): AsyncIterable<AgentEvent> {
   const messages: unknown[] = [];
-  const tools = toAiTools(canUseTool);
+  const tools = toAiTools(toolDescriptors, canUseTool);
 
   for await (const input of prompt) {
     const userText = extractUserText(input);

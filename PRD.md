@@ -100,7 +100,7 @@ All tools are TypeScript functions exposed to the model as AI SDK tool definitio
 - `plex_apply_match(ratingKey, guid, name?)` — switch a library item to a chosen match; **mutating**
 
 **mdblist**:
-- `mdblist_ratings(tmdbId, mediaType)` — aggregated ratings (RT critics/audience, IMDb, Metacritic, Letterboxd, etc.)
+- `mdblist_ratings(items)` — aggregated ratings (RT critics/audience, IMDb, Metacritic, Letterboxd, etc.) for one or many `{tmdbId, mediaType}` titles in a single batched call
 
 **Radarr** (re-grab flow only):
 - `radarr_replace_movie(tmdbId, keepFile?)` — delete the existing file (unless `keepFile`) and trigger a fresh `MoviesSearch`; **mutating**

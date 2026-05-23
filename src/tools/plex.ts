@@ -194,15 +194,16 @@ export const plex_unwatched = tool(
       };
     }
 
-    const collected: PlexMetadata[] = [];
-    for (const sec of wanted) {
-      const data = await plexApi<PlexResponse>(`/library/sections/${sec.key}/unwatched`, {
-        sort: sortParam,
-        'X-Plex-Container-Start': '0',
-        'X-Plex-Container-Size': String(limit),
-      });
-      collected.push(...(data.MediaContainer.Metadata ?? []));
-    }
+    const responses = await Promise.all(
+      wanted.map((sec) =>
+        plexApi<PlexResponse>(`/library/sections/${sec.key}/unwatched`, {
+          sort: sortParam,
+          'X-Plex-Container-Start': '0',
+          'X-Plex-Container-Size': String(limit),
+        })
+      )
+    );
+    const collected: PlexMetadata[] = responses.flatMap((data) => data.MediaContainer.Metadata ?? []);
 
     // Re-sort the merged list when we queried multiple sections (Plex sorts within each).
     if (wanted.length > 1 && sortMode !== 'random') {

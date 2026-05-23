@@ -229,11 +229,10 @@ export const sonarr_replace = tool(
 
         const deleted: { season: number; episode: number; episodeFileId: number }[] = [];
         if (!keepFile) {
-          const fileIds = new Set<number>();
+          const seenFileIds = new Set<number>();
           for (const ep of targets) {
-            if (ep.hasFile && ep.episodeFileId > 0 && !fileIds.has(ep.episodeFileId)) {
-              fileIds.add(ep.episodeFileId);
-              await sonarrApi(`/episodefile/${ep.episodeFileId}`, { method: 'DELETE' });
+            if (ep.hasFile && ep.episodeFileId > 0 && !seenFileIds.has(ep.episodeFileId)) {
+              seenFileIds.add(ep.episodeFileId);
               deleted.push({
                 season: ep.seasonNumber,
                 episode: ep.episodeNumber,
@@ -241,6 +240,11 @@ export const sonarr_replace = tool(
               });
             }
           }
+          await Promise.all(
+            deleted.map((d) =>
+              sonarrApi(`/episodefile/${d.episodeFileId}`, { method: 'DELETE' })
+            )
+          );
         }
 
         const command =

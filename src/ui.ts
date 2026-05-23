@@ -1,7 +1,7 @@
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 
-marked.use(markedTerminal() as never);
+marked.use(markedTerminal({ tab: 0 }) as never);
 
 const isTTY = process.stdout.isTTY;
 const c = (code: string) => (isTTY ? `\x1b[${code}m` : '');
