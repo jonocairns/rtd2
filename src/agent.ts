@@ -14,6 +14,9 @@ import {
   overseerr_get_request,
   overseerr_create_request,
   overseerr_cancel_request,
+  overseerr_delete_request,
+  overseerr_approve_request,
+  overseerr_reject_request,
   overseerr_recommend,
   overseerr_trending,
   overseerr_discover,
@@ -43,6 +46,9 @@ const toolDescriptors = [
   overseerr_get_request,
   overseerr_create_request,
   overseerr_cancel_request,
+  overseerr_delete_request,
+  overseerr_approve_request,
+  overseerr_reject_request,
   overseerr_recommend,
   overseerr_trending,
   overseerr_discover,
@@ -75,7 +81,10 @@ Tools available:
 - overseerr_list_requests — list requests, optionally filtered by status.
 - overseerr_get_request — detail for one request by id.
 - overseerr_create_request — submit a new request. **MUTATING**.
-- overseerr_cancel_request — delete a request by request ID. **MUTATING**. Find the ID with overseerr_list_requests.
+- overseerr_approve_request — approve a pending request by request ID. **MUTATING**. Find the ID with overseerr_list_requests.
+- overseerr_reject_request — reject/decline a pending request by request ID. **MUTATING**. Find the ID with overseerr_list_requests.
+- overseerr_delete_request — delete a request by request ID. **MUTATING**. Find the ID with overseerr_list_requests.
+- overseerr_cancel_request — legacy alias for deleting a request by request ID. **MUTATING**.
 - overseerr_report_issue — flag a quality problem (video/audio/subtitle/other) for a title in the library. **MUTATING**.
 - plex_recently_added — list recently added content across all Plex libraries.
 - plex_watch_history — recently watched movies/episodes from Plex play history, newest first.

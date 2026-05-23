@@ -2,7 +2,32 @@ import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { safe } from './errors.js';
+import { once } from './idempotency.js';
 import { envelope, plural } from './output.js';
+
+function normalizeSection(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase().replace(/[\s_-]+/g, '');
+  if (['movie', 'film', 'films'].includes(normalized)) return 'movies';
+  if (['show', 'tv', 'series', 'tvshow', 'tvshows'].includes(normalized)) return 'shows';
+  return value;
+}
+
+function normalizeUnwatchedSort(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase().replace(/[\s-]+/g, '_');
+  if (['recent', 'newest', 'newly_added'].includes(normalized)) return 'recently_added';
+  if (['top_rated', 'best_rated', 'rating', 'rated'].includes(normalized)) return 'highest_rated';
+  if (['oldest', 'old'].includes(normalized)) return 'oldest_added';
+  return normalized;
+}
+
+const sectionSchema = z.preprocess(normalizeSection, z.enum(['movies', 'shows', 'all']));
+
+const unwatchedSortSchema = z.preprocess(
+  normalizeUnwatchedSort,
+  z.enum(['recently_added', 'highest_rated', 'random', 'oldest_added'])
+);
 
 async function plexApi<T = unknown>(
   path: string,
@@ -121,14 +146,12 @@ export const plex_unwatched = tool(
   'plex_unwatched',
   'List unwatched titles in the Plex library. Use this for "what should I watch tonight" — combine with mdblist_ratings to surface highly-rated picks. Defaults to movies; pass section="shows" for unwatched/partially-watched series.',
   {
-    section: z
-      .enum(['movies', 'shows', 'all'])
+    section: sectionSchema
       .optional()
-      .describe('Which library section type to query (default "movies")'),
-    sort: z
-      .enum(['recently_added', 'highest_rated', 'random', 'oldest_added'])
+      .describe('Which library section type to query (default "movies"). Accepts movie/movies, show/shows, series, tv, or all.'),
+    sort: unwatchedSortSchema
       .optional()
-      .describe('Sort order. "highest_rated" uses Plex audience rating (default "recently_added").'),
+      .describe('Sort order. "highest_rated" uses Plex audience rating (default "recently_added"). Accepts aliases like top_rated, recent, newest, or oldest.'),
     count: z
       .number()
       .int()
@@ -138,8 +161,10 @@ export const plex_unwatched = tool(
       .describe('Number of items to return (default 15)'),
   },
   safe(async ({ section, sort, count }) => {
-    const sectionFilter = section ?? 'movies';
-    const sortMode = sort ?? 'recently_added';
+    const sectionFilter = (normalizeSection(section) as 'movies' | 'shows' | 'all' | undefined) ?? 'movies';
+    const sortMode =
+      (normalizeUnwatchedSort(sort) as 'recently_added' | 'highest_rated' | 'random' | 'oldest_added' | undefined) ??
+      'recently_added';
     const limit = count ?? 15;
 
     const sortParam =
@@ -329,19 +354,21 @@ export const plex_apply_match = tool(
     guid: z.string().describe('The match guid (from plex_get_matches)'),
     name: z.string().optional().describe('Display name for the match (recommended)'),
   },
-  safe(async ({ ratingKey, guid, name }) => {
-    const params: Record<string, string> = { guid };
-    if (name) params.name = name;
-    await plexApi(`/library/metadata/${ratingKey}/match`, params, { method: 'PUT' });
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ ratingKey, applied: { guid, name: name ?? null } }, null, 2),
-        },
-      ],
-    };
-  }),
+  safe(async ({ ratingKey, guid, name }) =>
+    once(`plex_apply_match:${ratingKey}:${guid}`, async () => {
+      const params: Record<string, string> = { guid };
+      if (name) params.name = name;
+      await plexApi(`/library/metadata/${ratingKey}/match`, params, { method: 'PUT' });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ ratingKey, applied: { guid, name: name ?? null } }, null, 2),
+          },
+        ],
+      };
+    })
+  ),
   { annotations: { readOnlyHint: false } }
 );
 

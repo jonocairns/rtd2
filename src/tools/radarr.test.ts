@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { radarr_replace_movie } from './radarr.js';
 import { installFetchMock, invoke, route } from './_testing.js';
+import { resetIdempotencyForTests } from './idempotency.js';
 
 function radarrMovie(opts: { hasFile?: boolean } = {}) {
   return [
@@ -24,7 +25,7 @@ function radarrMovie(opts: { hasFile?: boolean } = {}) {
 
 describe('radarr_replace_movie', () => {
   beforeEach(() => {
-    // Each test installs its own mock.
+    resetIdempotencyForTests();
   });
 
   it('deletes the existing file BEFORE triggering the search command', async () => {
@@ -90,5 +91,38 @@ describe('radarr_replace_movie', () => {
     const result = await invoke(radarr_replace_movie, { tmdbId: 603 });
 
     expect(result.isError).toBe(true);
+  });
+
+  it('does not delete or trigger search twice for duplicate same-arg calls', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/movie?tmdbId=603', { json: radarrMovie() }),
+      route('DELETE', '/moviefile/7', { json: {} }),
+      route('POST', '/command', { json: { id: 99, name: 'MoviesSearch', status: 'queued' } }),
+    ]);
+
+    await invoke(radarr_replace_movie, { tmdbId: 603 });
+    const duplicate = await invoke(radarr_replace_movie, { tmdbId: 603 });
+
+    expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(1);
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect(JSON.parse((duplicate.content[0] as { text: string }).text)).toMatchObject({
+      idempotent: true,
+      duplicate: true,
+      status: 'completed',
+      key: 'radarr_replace_movie:603:false',
+    });
+  });
+
+  it('runs materially different keepFile calls separately', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/movie?tmdbId=603', { json: radarrMovie() }),
+      route('DELETE', '/moviefile/7', { json: {} }),
+      route('POST', '/command', { json: { id: 99, name: 'MoviesSearch', status: 'queued' } }),
+    ]);
+
+    await invoke(radarr_replace_movie, { tmdbId: 603 });
+    await invoke(radarr_replace_movie, { tmdbId: 603, keepFile: true });
+
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2);
   });
 });

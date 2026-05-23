@@ -33,14 +33,25 @@ const SOURCE_LABELS: Record<string, string> = {
   rogerebert: 'Roger Ebert',
 };
 
+function normalizeMediaType(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase().replace(/[\s_-]+/g, '');
+  if (['show', 'shows', 'series', 'tvshow', 'tvseries'].includes(normalized)) return 'tv';
+  if (['movies', 'film', 'films'].includes(normalized)) return 'movie';
+  return value;
+}
+
+const mediaTypeSchema = z.preprocess(normalizeMediaType, z.enum(['movie', 'tv']));
+
 export const mdblist_ratings = tool(
   'mdblist_ratings',
   'Fetch aggregated ratings (Rotten Tomatoes, IMDb, Metacritic, Letterboxd, etc.) for a movie or TV show from MDBList. Requires the TMDb ID and media type — call overseerr_search first if you only have a title.',
   {
     tmdbId: z.number().int().describe('TMDb ID of the title'),
-    mediaType: z.enum(['movie', 'tv']).describe('movie or tv'),
+    mediaType: mediaTypeSchema.describe('movie or tv'),
   },
   safe(async ({ tmdbId, mediaType }) => {
+    const type = normalizeMediaType(mediaType) as 'movie' | 'tv';
     if (!env.MDBLIST_API_KEY) {
       return {
         content: [{ type: 'text', text: 'MDBLIST_API_KEY is not configured.' }],
@@ -50,7 +61,7 @@ export const mdblist_ratings = tool(
     const params = new URLSearchParams({
       apikey: env.MDBLIST_API_KEY,
       tm: String(tmdbId),
-      m: mediaType === 'tv' ? 'show' : 'movie',
+      m: type === 'tv' ? 'show' : 'movie',
     });
 
     const res = await fetch(`https://mdblist.com/api/?${params.toString()}`, {

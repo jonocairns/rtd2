@@ -4,7 +4,7 @@ Notes on hardening the agent's tool calls. Captures the current state, where 202
 
 ## What we already do
 
-- **HITL on mutating tools.** `confirm.ts` gates `overseerr_create_request`, `radarr_replace_movie`, `sonarr_replace`, `plex_apply_match` behind a CLI prompt. Read-only tools run automatically.
+- **HITL on mutating tools.** `confirm.ts` gates request writes, delete/replace actions, and Plex match changes behind a CLI prompt. Read-only tools run automatically.
 - **Boot-time validation** of every configured backend (Overseerr, Radarr, Sonarr). Optional services skipped if unset.
 - **Turn cap** of 30 in `agent.ts` — prevents runaway loops on a single user query.
 - **Single-source env validation** in `env.ts` via zod; missing required vars fail loudly at startup.
@@ -39,13 +39,15 @@ Per [HITL guidance](https://medium.com/@arvisionlab/human-in-the-loop-ai-agents-
 
 **Implemented.** Each mutating tool exports a `resolve*` function ([overseerr.ts](src/tools/overseerr.ts), [radarr.ts](src/tools/radarr.ts), [sonarr.ts](src/tools/sonarr.ts), [plex.ts](src/tools/plex.ts)) and [confirm.ts](src/confirm.ts) routes through a `RESOLVERS` registry — gate now shows title + year + current file before prompting. Falls back to raw JSON if the lookup itself fails.
 
-### 2. Idempotency keys on every write
+### 2. Idempotency keys on every write ✅
 
 **Problem.** Models retry under uncertainty. A second `overseerr_create_request` for the same `tmdbId` while the first is in-flight creates a duplicate. The system prompt asks the agent to check first — that's not a guarantee, it's a hope.
 
 **Fix.** Every mutating tool accepts an idempotency key (or derives one from `tool + tmdbId + operation`) and returns the prior result on duplicates. Per [Composio's 2026 integration guide](https://composio.dev/content/apis-ai-agents-integration-patterns): "tools must handle these patterns gracefully."
 
 Practical shape: a small in-memory map keyed by `${tool}:${primaryId}` with a TTL of a few minutes, plus server-side dedup checks (e.g. `overseerr_list_requests` filter before `create_request`).
+
+**Implemented.** Shared in-memory [`once()` registry](src/tools/idempotency.ts) wraps every mutating handler in the owning service module. Keys are derived from operation + primary identity + material args, duplicate completed calls return the prior result in a structured model-visible envelope, and in-flight duplicates return a structured "already in progress" response without starting a second write. The registry defaults to a 5-minute TTL and exposes test reset/clock hooks. `overseerr_create_request` also checks current media status before POSTing and skips titles that are already pending, processing, partially available, or available.
 
 ### 3. `isError: true` instead of throws ✅
 
@@ -109,8 +111,8 @@ Composio and Zylos both call this out: explicit contracts beat raw dumps. The `n
 
 **Implemented.**
 
-- **Unit:** vitest. Mocked-fetch helper at [src/tools/_testing.ts](src/tools/_testing.ts). Tests at [src/tools/*.test.ts](src/tools/) cover the `safe()` wrapper, the four mutating tools (call order, keepFile branches, error paths), and the envelope shape on a couple of read tools. 23 tests, runs in ~300ms. `pnpm test`.
-- **Eval:** [evalite](https://www.npmjs.com/package/evalite) — TS-native eval runner with built-in run history (SQLite at `node_modules/.evalite/cache.sqlite`) and a local web UI for diffing across runs. Per-run cost is shown in a column, with rates pulled from [LiteLLM's pricing catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) at startup so changing the model in [agent.ts](src/agent.ts) updates costs automatically. [evals/_runner.ts](evals/_runner.ts) installs a host-aware fetch interceptor — backend hosts (overseerr.test, plex.test, radarr.test, sonarr.test, mdblist.com) are mocked; model API hosts pass through so the configured model is exercised. Reusable scorers in [evals/_scorers.ts](evals/_scorers.ts) (`containsTools`, `toolOrder`, `finalTextIncludes`, `toolInputMatches`). Five scenarios in [evals/](evals/): search-and-request, filmography-gap, issue-and-regrab, streaming-availability, tonight-watch. Run `pnpm eval` once (requires a real model provider API key; costs API credits per run), `pnpm eval:ui` to see the run-history UI.
+- **Unit:** vitest. Mocked-fetch helper at [src/tools/_testing.ts](src/tools/_testing.ts). Tests cover the `safe()` wrapper, local SQLite store, mutating tool idempotency, request moderation, title enrichment, alias normalization, call order, keepFile branches, error paths, and envelope shapes. `pnpm test`.
+- **Eval:** [evalite](https://www.npmjs.com/package/evalite) — TS-native eval runner with built-in run history (SQLite at `node_modules/.evalite/cache.sqlite`) and a local web UI for diffing across runs. Per-run cost is shown in a column, with rates pulled from [LiteLLM's pricing catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) at startup so changing the model in [agent.ts](src/agent.ts) updates costs automatically. [evals/_runner.ts](evals/_runner.ts) installs a host-aware fetch interceptor — backend hosts (overseerr.test, plex.test, radarr.test, sonarr.test, mdblist.com) are mocked; model API hosts pass through so the configured model is exercised. Reusable scorers in [evals/_scorers.ts](evals/_scorers.ts) (`containsTools`, `toolOrder`, `toolCallCount`, `finalTextIncludes`, `toolInputMatches`). Scenarios in [evals/](evals/) now cover search-and-request, request management, request title enrichment, alias resilience, delete-vs-replace selection, Plex match correction, Sonarr replacement scope, filmography gaps, issue-and-regrab, streaming availability, and tonight-watch recommendations. Run `pnpm eval` once (requires a real model provider API key; costs API credits per run), `pnpm eval:ui` to see the run-history UI.
 
 ### 8. Self-check after destructive ops (optional)
 

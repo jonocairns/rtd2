@@ -2,6 +2,8 @@ import { reportTrace } from 'evalite/traces';
 import { run } from '../src/agent.js';
 import type { CanUseTool } from '../src/confirm.js';
 import type { MockRoute } from '../src/tools/_testing.js';
+import { resetDbForTests } from '../src/db.js';
+import { resetIdempotencyForTests } from '../src/tools/idempotency.js';
 import { addUsage, emptyUsage, type Usage } from './_cost.js';
 
 // Hosts that pass through to real fetch — model APIs + a couple of read-only
@@ -48,6 +50,8 @@ export async function runScenario({
 
   const originalFetch = globalThis.fetch;
   const backendCalls: { url: string; method: string }[] = [];
+  resetDbForTests(':memory:');
+  resetIdempotencyForTests();
 
   globalThis.fetch = (async (
     input: string | URL | Request,

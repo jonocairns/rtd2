@@ -2,6 +2,7 @@ import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { safe } from './errors.js';
+import { once } from './idempotency.js';
 
 function requireConfig(): { url: string; key: string } {
   if (!env.SONARR_URL || !env.SONARR_API_KEY) {
@@ -140,39 +141,44 @@ export const sonarr_delete_series = tool(
       .optional()
       .describe('If true, add an import list exclusion so Sonarr will not re-add the series automatically. Default false.'),
   },
-  safe(async ({ tmdbId, deleteFiles, addImportListExclusion }) => {
-    const tvdbId = await tmdbToTvdb(tmdbId);
-    const seriesList = await sonarrApi<SonarrSeries[]>(`/series?tvdbId=${tvdbId}`);
-    const series = seriesList[0];
-    if (!series) {
-      throw new Error(`No Sonarr series found for TVDB ID ${tvdbId} (TMDb ${tmdbId}).`);
-    }
+  safe(async ({ tmdbId, deleteFiles, addImportListExclusion }) =>
+    once(
+      `sonarr_delete_series:${tmdbId}:${deleteFiles ?? false}:${addImportListExclusion ?? false}`,
+      async () => {
+        const tvdbId = await tmdbToTvdb(tmdbId);
+        const seriesList = await sonarrApi<SonarrSeries[]>(`/series?tvdbId=${tvdbId}`);
+        const series = seriesList[0];
+        if (!series) {
+          throw new Error(`No Sonarr series found for TVDB ID ${tvdbId} (TMDb ${tmdbId}).`);
+        }
 
-    const params = new URLSearchParams({
-      deleteFiles: String(deleteFiles ?? false),
-      addImportListExclusion: String(addImportListExclusion ?? false),
-    });
+        const params = new URLSearchParams({
+          deleteFiles: String(deleteFiles ?? false),
+          addImportListExclusion: String(addImportListExclusion ?? false),
+        });
 
-    await sonarrApi(`/series/${series.id}?${params}`, { method: 'DELETE' });
+        await sonarrApi(`/series/${series.id}?${params}`, { method: 'DELETE' });
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
+        return {
+          content: [
             {
-              sonarrId: series.id,
-              title: series.title,
-              deletedFromSonarr: true,
-              filesDeletedFromDisk: deleteFiles ?? false,
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  sonarrId: series.id,
+                  title: series.title,
+                  deletedFromSonarr: true,
+                  filesDeletedFromDisk: deleteFiles ?? false,
+                },
+                null,
+                2
+              ),
             },
-            null,
-            2
-          ),
-        },
-      ],
-    };
-  }),
+          ],
+        };
+      }
+    )
+  ),
   { annotations: { readOnlyHint: false } }
 );
 
@@ -193,77 +199,82 @@ export const sonarr_replace = tool(
       .optional()
       .describe('If true, skip file deletion and only trigger a new search. Default false.'),
   },
-  safe(async ({ tmdbId, seasonNumber, episodeNumber, keepFile }) => {
-    const tvdbId = await tmdbToTvdb(tmdbId);
-    const seriesList = await sonarrApi<SonarrSeries[]>(`/series?tvdbId=${tvdbId}`);
-    const series = seriesList[0];
-    if (!series) {
-      throw new Error(`No Sonarr series found for TVDB ID ${tvdbId} (TMDb ${tmdbId}).`);
-    }
-
-    const episodes = await sonarrApi<SonarrEpisode[]>(
-      `/episode?seriesId=${series.id}&seasonNumber=${seasonNumber}`
-    );
-
-    const targets =
-      episodeNumber !== undefined
-        ? episodes.filter((e) => e.episodeNumber === episodeNumber)
-        : episodes;
-
-    if (targets.length === 0) {
-      throw new Error(
-        episodeNumber !== undefined
-          ? `S${seasonNumber}E${episodeNumber} not found in Sonarr for "${series.title}".`
-          : `No episodes found for "${series.title}" season ${seasonNumber}.`
-      );
-    }
-
-    const deleted: { season: number; episode: number; episodeFileId: number }[] = [];
-    if (!keepFile) {
-      const fileIds = new Set<number>();
-      for (const ep of targets) {
-        if (ep.hasFile && ep.episodeFileId > 0 && !fileIds.has(ep.episodeFileId)) {
-          fileIds.add(ep.episodeFileId);
-          await sonarrApi(`/episodefile/${ep.episodeFileId}`, { method: 'DELETE' });
-          deleted.push({
-            season: ep.seasonNumber,
-            episode: ep.episodeNumber,
-            episodeFileId: ep.episodeFileId,
-          });
+  safe(async ({ tmdbId, seasonNumber, episodeNumber, keepFile }) =>
+    once(
+      `sonarr_replace:${tmdbId}:${seasonNumber}:${episodeNumber ?? 'all'}:${keepFile ?? false}`,
+      async () => {
+        const tvdbId = await tmdbToTvdb(tmdbId);
+        const seriesList = await sonarrApi<SonarrSeries[]>(`/series?tvdbId=${tvdbId}`);
+        const series = seriesList[0];
+        if (!series) {
+          throw new Error(`No Sonarr series found for TVDB ID ${tvdbId} (TMDb ${tmdbId}).`);
         }
-      }
-    }
 
-    const command =
-      episodeNumber !== undefined
-        ? await sonarrApi<{ id: number; status: string }>('/command', {
-            method: 'POST',
-            body: JSON.stringify({ name: 'EpisodeSearch', episodeIds: targets.map((t) => t.id) }),
-          })
-        : await sonarrApi<{ id: number; status: string }>('/command', {
-            method: 'POST',
-            body: JSON.stringify({ name: 'SeasonSearch', seriesId: series.id, seasonNumber }),
-          });
+        const episodes = await sonarrApi<SonarrEpisode[]>(
+          `/episode?seriesId=${series.id}&seasonNumber=${seasonNumber}`
+        );
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
+        const targets =
+          episodeNumber !== undefined
+            ? episodes.filter((e) => e.episodeNumber === episodeNumber)
+            : episodes;
+
+        if (targets.length === 0) {
+          throw new Error(
+            episodeNumber !== undefined
+              ? `S${seasonNumber}E${episodeNumber} not found in Sonarr for "${series.title}".`
+              : `No episodes found for "${series.title}" season ${seasonNumber}.`
+          );
+        }
+
+        const deleted: { season: number; episode: number; episodeFileId: number }[] = [];
+        if (!keepFile) {
+          const fileIds = new Set<number>();
+          for (const ep of targets) {
+            if (ep.hasFile && ep.episodeFileId > 0 && !fileIds.has(ep.episodeFileId)) {
+              fileIds.add(ep.episodeFileId);
+              await sonarrApi(`/episodefile/${ep.episodeFileId}`, { method: 'DELETE' });
+              deleted.push({
+                season: ep.seasonNumber,
+                episode: ep.episodeNumber,
+                episodeFileId: ep.episodeFileId,
+              });
+            }
+          }
+        }
+
+        const command =
+          episodeNumber !== undefined
+            ? await sonarrApi<{ id: number; status: string }>('/command', {
+                method: 'POST',
+                body: JSON.stringify({ name: 'EpisodeSearch', episodeIds: targets.map((t) => t.id) }),
+              })
+            : await sonarrApi<{ id: number; status: string }>('/command', {
+                method: 'POST',
+                body: JSON.stringify({ name: 'SeasonSearch', seriesId: series.id, seasonNumber }),
+              });
+
+        return {
+          content: [
             {
-              sonarrId: series.id,
-              title: series.title,
-              season: seasonNumber,
-              episode: episodeNumber ?? null,
-              deleted,
-              searchCommand: { id: command.id, status: command.status },
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  sonarrId: series.id,
+                  title: series.title,
+                  season: seasonNumber,
+                  episode: episodeNumber ?? null,
+                  deleted,
+                  searchCommand: { id: command.id, status: command.status },
+                },
+                null,
+                2
+              ),
             },
-            null,
-            2
-          ),
-        },
-      ],
-    };
-  }),
+          ],
+        };
+      }
+    )
+  ),
   { annotations: { readOnlyHint: false } }
 );

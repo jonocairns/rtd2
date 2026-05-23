@@ -77,6 +77,8 @@ Then talk to the agent about your library. Examples:
 
 The agent will ask for confirmation before making mutating changes. Pass `--yolo` to skip confirmation.
 
+The CLI keeps a small local SQLite database at `data/media-agent.sqlite` for reusable tool metadata such as TMDb title lookups. The database is runtime state and is gitignored.
+
 ## Project structure
 
 See [PRD.md §8](PRD.md#8-file-layout) for the full layout. Top level:

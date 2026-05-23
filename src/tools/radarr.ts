@@ -2,6 +2,7 @@ import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { safe } from './errors.js';
+import { once } from './idempotency.js';
 
 function requireConfig(): { url: string; key: string } {
   if (!env.RADARR_URL || !env.RADARR_API_KEY) {
@@ -119,39 +120,41 @@ export const radarr_delete_movie = tool(
       .optional()
       .describe('If true, add an import exclusion so Radarr will not re-add the movie automatically. Default false.'),
   },
-  safe(async ({ tmdbId, deleteFiles, addImportExclusion }) => {
-    const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
-    const movie = matches[0];
-    if (!movie) {
-      throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
-    }
+  safe(async ({ tmdbId, deleteFiles, addImportExclusion }) =>
+    once(`radarr_delete_movie:${tmdbId}:${deleteFiles ?? false}:${addImportExclusion ?? false}`, async () => {
+      const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
+      const movie = matches[0];
+      if (!movie) {
+        throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
+      }
 
-    const params = new URLSearchParams({
-      deleteFiles: String(deleteFiles ?? false),
-      addImportExclusion: String(addImportExclusion ?? false),
-    });
+      const params = new URLSearchParams({
+        deleteFiles: String(deleteFiles ?? false),
+        addImportExclusion: String(addImportExclusion ?? false),
+      });
 
-    await radarrApi(`/movie/${movie.id}?${params}`, { method: 'DELETE' });
+      await radarrApi(`/movie/${movie.id}?${params}`, { method: 'DELETE' });
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              radarrId: movie.id,
-              title: movie.title,
-              year: movie.year,
-              deletedFromRadarr: true,
-              filesDeletedFromDisk: deleteFiles ?? false,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    };
-  }),
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                radarrId: movie.id,
+                title: movie.title,
+                year: movie.year,
+                deletedFromRadarr: true,
+                filesDeletedFromDisk: deleteFiles ?? false,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    })
+  ),
   { annotations: { readOnlyHint: false } }
 );
 
@@ -165,38 +168,40 @@ export const radarr_replace_movie = tool(
       .optional()
       .describe('If true, skip the file deletion and only trigger a new search. Default false.'),
   },
-  safe(async ({ tmdbId, keepFile }) => {
-    const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
-    const movie = matches[0];
-    if (!movie) {
-      throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
-    }
+  safe(async ({ tmdbId, keepFile }) =>
+    once(`radarr_replace_movie:${tmdbId}:${keepFile ?? false}`, async () => {
+      const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
+      const movie = matches[0];
+      if (!movie) {
+        throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
+      }
 
-    const result: Record<string, unknown> = {
-      radarrId: movie.id,
-      title: movie.title,
-      year: movie.year,
-    };
-
-    if (!keepFile && movie.hasFile && movie.movieFile?.id) {
-      await radarrApi(`/moviefile/${movie.movieFile.id}`, { method: 'DELETE' });
-      result.deleted = {
-        path: movie.movieFile.relativePath ?? null,
-        quality: movie.movieFile.quality?.quality?.name ?? null,
+      const result: Record<string, unknown> = {
+        radarrId: movie.id,
+        title: movie.title,
+        year: movie.year,
       };
-    } else {
-      result.deleted = null;
-    }
 
-    const command = await radarrApi<{ id: number; name: string; status: string }>('/command', {
-      method: 'POST',
-      body: JSON.stringify({ name: 'MoviesSearch', movieIds: [movie.id] }),
-    });
-    result.searchCommand = { id: command.id, status: command.status };
+      if (!keepFile && movie.hasFile && movie.movieFile?.id) {
+        await radarrApi(`/moviefile/${movie.movieFile.id}`, { method: 'DELETE' });
+        result.deleted = {
+          path: movie.movieFile.relativePath ?? null,
+          quality: movie.movieFile.quality?.quality?.name ?? null,
+        };
+      } else {
+        result.deleted = null;
+      }
 
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    };
-  }),
+      const command = await radarrApi<{ id: number; name: string; status: string }>('/command', {
+        method: 'POST',
+        body: JSON.stringify({ name: 'MoviesSearch', movieIds: [movie.id] }),
+      });
+      result.searchCommand = { id: command.id, status: command.status };
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    })
+  ),
   { annotations: { readOnlyHint: false } }
 );

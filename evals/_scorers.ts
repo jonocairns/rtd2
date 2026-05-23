@@ -18,6 +18,20 @@ export function containsTools(...expected: string[]) {
   });
 }
 
+// Returns 1 when a tool appears exactly `count` times.
+export function toolCallCount(name: string, count: number) {
+  return createScorer<ScenarioInput, ScenarioResult>({
+    name: `${name} called ${count} time(s)`,
+    scorer: ({ output }) => {
+      const actual = output.toolCalls.filter((c) => c.name === name).length;
+      return {
+        score: actual === count ? 1 : 0,
+        metadata: { actual, expected: count, sequence: output.toolCalls.map((c) => c.name) },
+      };
+    },
+  });
+}
+
 // Returns 1 when `before` appears in the trace strictly before `after`.
 export function toolOrder(before: string, after: string) {
   return createScorer<ScenarioInput, ScenarioResult>({

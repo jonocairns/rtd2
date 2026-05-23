@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { sonarr_replace } from './sonarr.js';
 import { installFetchMock, invoke, route } from './_testing.js';
+import { resetIdempotencyForTests } from './idempotency.js';
 
 function tvDetail() {
   return { externalIds: { tvdbId: 1234 } };
@@ -17,6 +18,10 @@ function sonarrEpisodes() {
     { id: 103, seriesId: 11, seasonNumber: 1, episodeNumber: 3, episodeFileId: 0, hasFile: false, title: 'In Perpetuity' },
   ];
 }
+
+beforeEach(() => {
+  resetIdempotencyForTests();
+});
 
 describe('sonarr_replace (single episode)', () => {
   it('deletes the single episode file BEFORE triggering EpisodeSearch', async () => {
@@ -56,6 +61,28 @@ describe('sonarr_replace (single episode)', () => {
     const deletes = calls.filter((c) => c.method === 'DELETE');
     expect(deletes).toHaveLength(1);
     expect(deletes[0].url).toMatch(/episodefile\/502/);
+  });
+
+  it('does not delete or trigger search twice for duplicate same-arg calls', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/api/v1/tv/603', { json: tvDetail() }),
+      route('GET', '/series?tvdbId=1234', { json: sonarrSeries() }),
+      route('GET', '/episode?seriesId=11', { json: sonarrEpisodes() }),
+      route('DELETE', '/episodefile/502', { json: {} }),
+      route('POST', '/command', { json: { id: 50, status: 'queued' } }),
+    ]);
+
+    await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1, episodeNumber: 2 });
+    const duplicate = await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1, episodeNumber: 2 });
+
+    expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(1);
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect(JSON.parse((duplicate.content[0] as { text: string }).text)).toMatchObject({
+      idempotent: true,
+      duplicate: true,
+      status: 'completed',
+      key: 'sonarr_replace:603:1:2:false',
+    });
   });
 });
 

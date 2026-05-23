@@ -1,7 +1,7 @@
 import type readline from 'node:readline';
 import { box, colors, Spinner, stripAnsi } from './ui.js';
 import type { AuditLog } from './audit.js';
-import { resolveCreateRequest } from './tools/overseerr.js';
+import { resolveCreateRequest, resolveRequestAction } from './tools/overseerr.js';
 import { resolveDeleteMovie, resolveReplaceMovie } from './tools/radarr.js';
 import { resolveDeleteSeries, resolveReplace } from './tools/sonarr.js';
 import { resolveApplyMatch } from './tools/plex.js';
@@ -11,6 +11,14 @@ type Resolver = (input: Record<string, unknown>) => Promise<string[]>;
 const RESOLVERS: Record<string, Resolver> = {
   overseerr_create_request: (i) =>
     resolveCreateRequest(i as Parameters<typeof resolveCreateRequest>[0]),
+  overseerr_cancel_request: (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'delete' }),
+  overseerr_delete_request: (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'delete' }),
+  overseerr_approve_request: (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'approve' }),
+  overseerr_reject_request: (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'reject' }),
   radarr_replace_movie: (i) => resolveReplaceMovie(i as Parameters<typeof resolveReplaceMovie>[0]),
   radarr_delete_movie: (i) => resolveDeleteMovie(i as Parameters<typeof resolveDeleteMovie>[0]),
   sonarr_replace: (i) => resolveReplace(i as Parameters<typeof resolveReplace>[0]),
@@ -19,6 +27,14 @@ const RESOLVERS: Record<string, Resolver> = {
   plex_apply_match: (i) => resolveApplyMatch(i as Parameters<typeof resolveApplyMatch>[0]),
   'mcp__media-tools__overseerr_create_request': (i) =>
     resolveCreateRequest(i as Parameters<typeof resolveCreateRequest>[0]),
+  'mcp__media-tools__overseerr_cancel_request': (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'delete' }),
+  'mcp__media-tools__overseerr_delete_request': (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'delete' }),
+  'mcp__media-tools__overseerr_approve_request': (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'approve' }),
+  'mcp__media-tools__overseerr_reject_request': (i) =>
+    resolveRequestAction({ ...(i as { id: number }), action: 'reject' }),
   'mcp__media-tools__radarr_replace_movie': (i) =>
     resolveReplaceMovie(i as Parameters<typeof resolveReplaceMovie>[0]),
   'mcp__media-tools__radarr_delete_movie': (i) =>
@@ -33,9 +49,7 @@ const RESOLVERS: Record<string, Resolver> = {
 
 const MUTATING_TOOLS = new Set([
   ...Object.keys(RESOLVERS),
-  'overseerr_cancel_request',
   'overseerr_report_issue',
-  'mcp__media-tools__overseerr_cancel_request',
   'mcp__media-tools__overseerr_report_issue',
 ]);
 

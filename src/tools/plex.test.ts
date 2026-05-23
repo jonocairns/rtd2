@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { plex_apply_match, plex_search, plex_unwatched } from './plex.js';
 import { installFetchMock, invoke, route } from './_testing.js';
+import { resetIdempotencyForTests } from './idempotency.js';
+
+beforeEach(() => {
+  resetIdempotencyForTests();
+});
 
 describe('plex_apply_match', () => {
   it('sends a PUT to /library/metadata/{key}/match with guid + name in the querystring', async () => {
@@ -109,5 +114,38 @@ describe('plex_unwatched', () => {
 
     // Only the movie section should have been queried.
     expect(calls.filter((c) => c.url.includes('/unwatched'))).toHaveLength(1);
+  });
+
+  it('accepts natural section and sort aliases', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/2/unwatched', {
+        json: {
+          MediaContainer: {
+            Metadata: [{ title: 'Severance', type: 'show', year: 2022, audienceRating: 9.1 }],
+          },
+        },
+      }),
+      route('GET', '/library/sections', {
+        json: {
+          MediaContainer: {
+            Directory: [
+              { key: '1', type: 'movie', title: 'Movies' },
+              { key: '2', type: 'show', title: 'TV Shows' },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_unwatched, { section: 'series', sort: 'top_rated' });
+
+    const unwatched = calls.find((c) => c.url.includes('/unwatched'));
+    expect(unwatched).toBeDefined();
+    const url = new URL(unwatched?.url ?? '');
+    expect(url.pathname).toBe('/library/sections/2/unwatched');
+    expect(url.searchParams.get('sort')).toBe('audienceRating:desc');
+
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.summary).toMatch(/shows, sort: highest_rated/);
   });
 });

@@ -1,7 +1,9 @@
 import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
+import { getStoredMediaTitle, storeMediaTitle, type MediaTitle } from '../db.js';
 import { safe } from './errors.js';
+import { hashString, once } from './idempotency.js';
 import { envelope, plural } from './output.js';
 
 // Overseerr uses the double-submit cookie CSRF pattern: a GET to any
@@ -80,6 +82,33 @@ const statusMap: Record<number, string> = {
   5: 'available',
 };
 
+function normalizeMediaType(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase().replace(/[\s_-]+/g, '');
+  if (['show', 'shows', 'series', 'tvshow', 'tvseries'].includes(normalized)) return 'tv';
+  if (['movies', 'film', 'films'].includes(normalized)) return 'movie';
+  return value;
+}
+
+function normalizeIssueType(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase().replace(/[\s_-]+/g, '');
+  if (['subtitles', 'caption', 'captions', 'cc'].includes(normalized)) return 'subtitle';
+  return value;
+}
+
+function normalizeCreditRole(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase().replace(/[\s_-]+/g, '');
+  if (['director', 'directors', 'directed'].includes(normalized)) return 'directing';
+  if (['writer', 'writers', 'written'].includes(normalized)) return 'writing';
+  if (['actor', 'actors', 'actress', 'actresses', 'cast'].includes(normalized)) return 'acting';
+  if (['everything', 'any'].includes(normalized)) return 'all';
+  return value;
+}
+
+const mediaTypeSchema = z.preprocess(normalizeMediaType, z.enum(['movie', 'tv']));
+
 interface SearchResult {
   id: number;
   mediaType: 'movie' | 'tv' | 'person';
@@ -151,39 +180,133 @@ interface OverseerrRequest {
     tmdbId: number;
     status: number;
     mediaType: 'movie' | 'tv';
+    title?: string;
+    name?: string;
+    releaseDate?: string;
+    firstAirDate?: string;
   };
   seasons?: { id: number; seasonNumber: number; status: number }[];
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function titleFromRequest(request: OverseerrRequest): MediaTitle | null {
+  const title = request.media.title ?? request.media.name;
+  if (!title) return null;
+  return {
+    mediaType: request.type,
+    tmdbId: request.media.tmdbId,
+    title,
+    year: (request.media.releaseDate ?? request.media.firstAirDate ?? '').slice(0, 4) || null,
+  };
+}
+
+async function fetchMediaTitle(
+  mediaType: 'movie' | 'tv',
+  tmdbId: number
+): Promise<MediaTitle | null> {
+  const stored = getStoredMediaTitle(mediaType, tmdbId);
+  if (stored) return stored;
+
+  try {
+    const detail = await api<MediaDetailFull>(`/${mediaType === 'tv' ? 'tv' : 'movie'}/${tmdbId}`);
+    const title = detail.title ?? detail.name;
+    if (!title) return null;
+    const mediaTitle = {
+      mediaType,
+      tmdbId,
+      title,
+      year: (detail.releaseDate ?? detail.firstAirDate ?? '').slice(0, 4) || null,
+    };
+    storeMediaTitle(mediaTitle);
+    return mediaTitle;
+  } catch {
+    return null;
+  }
+}
+
+async function enrichRequestTitles(requests: OverseerrRequest[]): Promise<Map<string, MediaTitle>> {
+  const titles = new Map<string, MediaTitle>();
+  const missing = new Map<string, { mediaType: 'movie' | 'tv'; tmdbId: number }>();
+
+  for (const request of requests) {
+    const key = `${request.type}:${request.media.tmdbId}`;
+    const embedded = titleFromRequest(request);
+    if (embedded) {
+      storeMediaTitle(embedded);
+      titles.set(key, embedded);
+      continue;
+    }
+
+    const stored = getStoredMediaTitle(request.type, request.media.tmdbId);
+    if (stored) {
+      titles.set(key, stored);
+    } else {
+      missing.set(key, { mediaType: request.type, tmdbId: request.media.tmdbId });
+    }
+  }
+
+  const fetched = await mapWithConcurrency([...missing.values()], 5, (item) =>
+    fetchMediaTitle(item.mediaType, item.tmdbId)
+  );
+  for (const title of fetched) {
+    if (title) titles.set(`${title.mediaType}:${title.tmdbId}`, title);
+  }
+
+  return titles;
+}
+
 export const overseerr_list_requests = tool(
   'overseerr_list_requests',
-  'List Overseerr requests. Optional filters: status (pending/approved/declined/available/unavailable/processing), take (max results, default 20).',
+  'List Overseerr requests. Optional filters: status (all/pending/approved/declined/available/unavailable/processing), take (max results, default 20).',
   {
     status: z
-      .enum(['pending', 'approved', 'declined', 'available', 'unavailable', 'processing'])
+      .enum(['all', 'pending', 'approved', 'declined', 'available', 'unavailable', 'processing'])
       .optional()
-      .describe('Filter by request status'),
+      .describe('Filter by request status. Use all or omit to list all requests.'),
     take: z.number().int().min(1).max(100).optional().describe('Max results (default 20)'),
   },
   safe(async ({ status, take }) => {
     const params = new URLSearchParams();
     params.set('take', String(take ?? 20));
-    if (status) params.set('filter', status);
+    if (status && status !== 'all') params.set('filter', status);
     const data = await api<{ results: OverseerrRequest[] }>(`/request?${params.toString()}`);
+    const titles = await enrichRequestTitles(data.results);
 
-    const items = data.results.map((r) => ({
-      id: r.id,
-      tmdbId: r.media.tmdbId,
-      type: r.type,
-      requestStatus: requestStatusMap[r.status] ?? 'unknown',
-      mediaStatus: statusMap[r.media.status] ?? 'unknown',
-      is4k: r.is4k,
-      createdAt: r.createdAt,
-      seasons: r.seasons?.map((s) => ({ n: s.seasonNumber, status: statusMap[s.status] })) ?? null,
-    }));
+    const items = data.results.map((r) => {
+      const title = titles.get(`${r.type}:${r.media.tmdbId}`);
+      return {
+        id: r.id,
+        tmdbId: r.media.tmdbId,
+        type: r.type,
+        title: title?.title ?? null,
+        year: title?.year ?? null,
+        requestStatus: requestStatusMap[r.status] ?? 'unknown',
+        mediaStatus: statusMap[r.media.status] ?? 'unknown',
+        is4k: r.is4k,
+        createdAt: r.createdAt,
+        seasons: r.seasons?.map((s) => ({ n: s.seasonNumber, status: statusMap[s.status] })) ?? null,
+      };
+    });
 
     return envelope(
-      `${plural(items.length, 'request')}${status ? ` (filter: ${status})` : ''}`,
+      `${plural(items.length, 'request')}${status && status !== 'all' ? ` (filter: ${status})` : ''}`,
       items
     );
   }),
@@ -198,23 +321,56 @@ export const overseerr_get_request = tool(
   },
   safe(async ({ id }) => {
     const data = await api<OverseerrRequest>(`/request/${id}`);
+    const title = (await enrichRequestTitles([data])).get(`${data.type}:${data.media.tmdbId}`);
     return {
-      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              ...data,
+              title: title?.title ?? null,
+              year: title?.year ?? null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
     };
   }),
   { annotations: { readOnlyHint: true } }
 );
+
+export async function resolveRequestAction(input: {
+  id: number;
+  action?: 'approve' | 'reject' | 'delete';
+}): Promise<string[]> {
+  const data = await api<OverseerrRequest>(`/request/${input.id}`);
+  const mediaTitle = (await enrichRequestTitles([data])).get(`${data.type}:${data.media.tmdbId}`);
+  const title = mediaTitle ? `${mediaTitle.title}${mediaTitle.year ? ` (${mediaTitle.year})` : ''}` : `TMDb ${data.media.tmdbId}`;
+  const action = input.action ?? 'update';
+  return [
+    `${action[0].toUpperCase()}${action.slice(1)} Overseerr request:`,
+    `  Request ID: ${data.id}`,
+    `  Title: ${title} (${data.type})`,
+    `  Request status: ${requestStatusMap[data.status] ?? 'unknown'}`,
+    `  Media status: ${statusMap[data.media.status] ?? 'unknown'}`,
+    `  Seasons: ${data.seasons?.map((s) => s.seasonNumber).join(', ') || 'n/a'}`,
+  ];
+}
 
 export const overseerr_recommend = tool(
   'overseerr_recommend',
   "Get TMDB-based recommendations for a movie or TV show. Returns up to 6 similar titles with their library status. Call overseerr_search first to get the tmdbId if you don't have it.",
   {
     tmdbId: z.number().int().describe('TMDb ID of the title to base recommendations on'),
-    mediaType: z.enum(['movie', 'tv']).describe('movie or tv'),
+    mediaType: mediaTypeSchema.describe('movie or tv'),
   },
   safe(async ({ tmdbId, mediaType }) => {
+    const type = normalizeMediaType(mediaType) as 'movie' | 'tv';
     const data = await api<{ results: SearchResult[] }>(
-      `/${mediaType}/${tmdbId}/recommendations`
+      `/${type}/${tmdbId}/recommendations`
     );
 
     const hits = (data.results ?? [])
@@ -245,12 +401,65 @@ export const overseerr_cancel_request = tool(
   {
     id: z.number().int().describe('The Overseerr request ID to cancel'),
   },
-  safe(async ({ id }) => {
-    const data = await api(`/request/${id}`, { method: 'DELETE' });
-    return {
-      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-    };
-  }),
+  safe(async ({ id }) =>
+    once(`overseerr_delete_request:${id}`, async () => {
+      const data = await api(`/request/${id}`, { method: 'DELETE' });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      };
+    })
+  ),
+  { annotations: { readOnlyHint: false } }
+);
+
+export const overseerr_delete_request = tool(
+  'overseerr_delete_request',
+  'Delete an Overseerr request by request ID. Use overseerr_list_requests to find the ID first. This is a mutating operation.',
+  {
+    id: z.number().int().describe('The Overseerr request ID to delete'),
+  },
+  safe(async ({ id }) =>
+    once(`overseerr_delete_request:${id}`, async () => {
+      const data = await api(`/request/${id}`, { method: 'DELETE' });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      };
+    })
+  ),
+  { annotations: { readOnlyHint: false } }
+);
+
+export const overseerr_approve_request = tool(
+  'overseerr_approve_request',
+  'Approve a pending Overseerr request by request ID. Use overseerr_list_requests to find the ID first. This is a mutating operation.',
+  {
+    id: z.number().int().describe('The Overseerr request ID to approve'),
+  },
+  safe(async ({ id }) =>
+    once(`overseerr_approve_request:${id}`, async () => {
+      const data = await api(`/request/${id}/approve`, { method: 'POST' });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      };
+    })
+  ),
+  { annotations: { readOnlyHint: false } }
+);
+
+export const overseerr_reject_request = tool(
+  'overseerr_reject_request',
+  'Reject/decline a pending Overseerr request by request ID. Use overseerr_list_requests to find the ID first. This is a mutating operation.',
+  {
+    id: z.number().int().describe('The Overseerr request ID to reject'),
+  },
+  safe(async ({ id }) =>
+    once(`overseerr_reject_request:${id}`, async () => {
+      const data = await api(`/request/${id}/decline`, { method: 'POST' });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      };
+    })
+  ),
   { annotations: { readOnlyHint: false } }
 );
 
@@ -258,11 +467,12 @@ export const overseerr_trending = tool(
   'overseerr_trending',
   'Get trending/popular movies or TV shows from Overseerr discover. Returns up to 10 results with library status.',
   {
-    mediaType: z.enum(['movie', 'tv']).describe('movie or tv'),
+    mediaType: mediaTypeSchema.describe('movie or tv'),
   },
   safe(async ({ mediaType }) => {
+    const type = normalizeMediaType(mediaType) as 'movie' | 'tv';
     const data = await api<{ results: SearchResult[] }>(
-      mediaType === 'movie' ? '/discover/movies' : '/discover/tv'
+      type === 'movie' ? '/discover/movies' : '/discover/tv'
     );
 
     const hits = (data.results ?? []).slice(0, 10).map((r) => ({
@@ -360,12 +570,12 @@ export const overseerr_discover = tool(
   'overseerr_discover',
   'Discover popular movies or TV shows by genre with library status. Use this for bare genre prompts like "horror", "sci-fi", "comedy", or "thriller".',
   {
-    mediaType: z.enum(['movie', 'tv']).optional().describe('movie or tv (default movie)'),
+    mediaType: mediaTypeSchema.optional().describe('movie or tv (default movie)'),
     genre: z.string().min(1).describe('Genre name, e.g. horror, sci-fi, comedy, thriller'),
     take: z.number().int().min(1).max(20).optional().describe('Max results (default 10)'),
   },
   safe(async ({ mediaType, genre, take }) => {
-    const type = mediaType ?? 'movie';
+    const type = (normalizeMediaType(mediaType) as 'movie' | 'tv' | undefined) ?? 'movie';
     const genreId = genreIdFor(type, genre);
     const params = new URLSearchParams({ genre: String(genreId) });
     const data = await api<{ results: SearchResult[] }>(
@@ -408,30 +618,37 @@ export const overseerr_report_issue = tool(
   'Report a quality issue (video, audio, subtitle, or other) with a title that is in the Plex library. Requires the TMDb ID — call overseerr_search first if needed.',
   {
     tmdbId: z.number().int().describe('TMDb ID of the title'),
-    mediaType: z.enum(['movie', 'tv']).describe('movie or tv'),
+    mediaType: mediaTypeSchema.describe('movie or tv'),
     issueType: z
-      .enum(['video', 'audio', 'subtitle', 'other'])
+      .preprocess(normalizeIssueType, z.enum(['video', 'audio', 'subtitle', 'other']))
       .describe('Category of the problem'),
     message: z.string().min(1).describe('Description of the issue'),
   },
   safe(async ({ tmdbId, mediaType, issueType, message }) => {
-    const detail = await api<MediaDetail>(`/${mediaType === 'tv' ? 'tv' : 'movie'}/${tmdbId}`);
-    const mediaId = detail.mediaInfo?.id;
+    const type = normalizeMediaType(mediaType) as 'movie' | 'tv';
+    const issue = normalizeIssueType(issueType) as 'video' | 'audio' | 'subtitle' | 'other';
+    return once(
+      `overseerr_report_issue:${type}:${tmdbId}:${issue}:${hashString(message)}`,
+      async () => {
+        const detail = await api<MediaDetail>(`/${type === 'tv' ? 'tv' : 'movie'}/${tmdbId}`);
+        const mediaId = detail.mediaInfo?.id;
 
-    if (!mediaId) {
-      throw new Error(
-        `No Overseerr media record found for TMDb ID ${tmdbId}. The title may not be in the library yet.`
-      );
-    }
+        if (!mediaId) {
+          throw new Error(
+            `No Overseerr media record found for TMDb ID ${tmdbId}. The title may not be in the library yet.`
+          );
+        }
 
-    const data = await api('/issue', {
-      method: 'POST',
-      body: JSON.stringify({ mediaId, issueType: issueTypeMap[issueType], message }),
-    });
+        const data = await api('/issue', {
+          method: 'POST',
+          body: JSON.stringify({ mediaId, issueType: issueTypeMap[issue], message }),
+        });
 
-    return {
-      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-    };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+        };
+      }
+    );
   }),
   { annotations: { readOnlyHint: false } }
 );
@@ -510,7 +727,7 @@ export const overseerr_person_credits = tool(
   {
     personId: z.number().int().describe('TMDb person ID (from overseerr_search_person)'),
     role: z
-      .enum(['directing', 'writing', 'acting', 'all'])
+      .preprocess(normalizeCreditRole, z.enum(['directing', 'writing', 'acting', 'all']))
       .optional()
       .describe('Filter by role. "directing" = jobs in Directing dept, "writing" = Writing dept, "acting" = cast credits, "all" = everything (default).'),
     limit: z
@@ -524,7 +741,7 @@ export const overseerr_person_credits = tool(
   safe(async ({ personId, role, limit }) => {
     const data = await api<CombinedCredits>(`/person/${personId}/combined_credits`);
     const max = limit ?? 80;
-    const want = role ?? 'all';
+    const want = (normalizeCreditRole(role) as 'directing' | 'writing' | 'acting' | 'all' | undefined) ?? 'all';
 
     type Row = {
       tmdbId: number;
@@ -627,7 +844,7 @@ export const overseerr_watch_providers = tool(
   'Check streaming/rent/buy availability for a movie or TV show in a given region. Useful before requesting something: if it\'s already on a streaming service the user subscribes to, they may not need to download a copy. Get the tmdbId from overseerr_search.',
   {
     tmdbId: z.number().int().describe('TMDb ID of the title'),
-    mediaType: z.enum(['movie', 'tv']).describe('movie or tv'),
+    mediaType: mediaTypeSchema.describe('movie or tv'),
     region: z
       .string()
       .length(2)
@@ -635,8 +852,9 @@ export const overseerr_watch_providers = tool(
       .describe('ISO 3166-1 alpha-2 country code (default "US")'),
   },
   safe(async ({ tmdbId, mediaType, region }) => {
+    const type = normalizeMediaType(mediaType) as 'movie' | 'tv';
     const data = await api<MediaWithWatchProviders>(
-      `/${mediaType === 'tv' ? 'tv' : 'movie'}/${tmdbId}`
+      `/${type === 'tv' ? 'tv' : 'movie'}/${tmdbId}`
     );
 
     const reg = (region ?? 'US').toUpperCase();
@@ -667,6 +885,20 @@ interface MediaDetailFull {
   mediaInfo?: { status?: number };
 }
 
+function createRequestKey(
+  mediaType: 'movie' | 'tv',
+  tmdbId: number,
+  seasons?: number[]
+): string {
+  const seasonKey =
+    mediaType === 'tv'
+      ? seasons && seasons.length > 0
+        ? [...seasons].sort((a, b) => a - b).join(',')
+        : 'all'
+      : 'all';
+  return `overseerr_create_request:${mediaType}:${tmdbId}:${seasonKey}`;
+}
+
 export async function resolveCreateRequest(input: {
   tmdbId: number;
   mediaType: 'movie' | 'tv';
@@ -692,24 +924,52 @@ export const overseerr_create_request = tool(
   'Create a new Overseerr request. For TV, pass `seasons` as an array of season numbers (e.g. [1] for season 1 only) or omit for all seasons. This is a mutating operation — the harness will prompt for user confirmation.',
   {
     tmdbId: z.number().int().describe('TMDb ID of the title (from overseerr_search)'),
-    mediaType: z.enum(['movie', 'tv']).describe('movie or tv'),
+    mediaType: mediaTypeSchema.describe('movie or tv'),
     seasons: z
       .array(z.number().int().min(1))
       .optional()
       .describe('TV only: list of season numbers to request. Omit for all seasons.'),
   },
   safe(async ({ tmdbId, mediaType, seasons }) => {
-    const body: Record<string, unknown> = { mediaId: tmdbId, mediaType };
-    if (mediaType === 'tv') {
-      body.seasons = seasons && seasons.length > 0 ? seasons : 'all';
-    }
-    const data = await api('/request', {
-      method: 'POST',
-      body: JSON.stringify(body),
+    const type = normalizeMediaType(mediaType) as 'movie' | 'tv';
+    return once(createRequestKey(type, tmdbId, seasons), async () => {
+      const detail = await api<MediaDetailFull>(`/${type === 'tv' ? 'tv' : 'movie'}/${tmdbId}`);
+      const currentStatus = detail.mediaInfo?.status;
+      if (currentStatus && [2, 3, 4, 5].includes(currentStatus)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  idempotent: true,
+                  skipped: true,
+                  duplicate: true,
+                  reason: `Title is already ${statusMap[currentStatus] ?? 'requested/available'}.`,
+                  tmdbId,
+                  mediaType: type,
+                  libraryStatus: statusMap[currentStatus] ?? 'unknown',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const body: Record<string, unknown> = { mediaId: tmdbId, mediaType: type };
+      if (type === 'tv') {
+        body.seasons = seasons && seasons.length > 0 ? seasons : 'all';
+      }
+      const data = await api('/request', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+      };
     });
-    return {
-      content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
-    };
   }),
   { annotations: { readOnlyHint: false } }
 );
