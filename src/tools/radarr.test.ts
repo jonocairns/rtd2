@@ -1,5 +1,10 @@
 import { describe, expect, it, beforeEach } from 'vitest';
-import { guardReplaceMovie, radarr_replace_movie, radarr_replacement_candidates } from './radarr.js';
+import {
+  guardReplaceMovie,
+  radarr_file_quality_check,
+  radarr_replace_movie,
+  radarr_replacement_candidates,
+} from './radarr.js';
 import { installFetchMock, invoke, route, routeSequence } from './_testing.js';
 import { resetIdempotencyForTests } from './idempotency.js';
 
@@ -341,6 +346,58 @@ describe('radarr_replacement_candidates', () => {
       noAcceptableCandidates: true,
       replacementFloor: '1080p',
     });
+  });
+});
+
+describe('radarr_file_quality_check', () => {
+  it('flags a low-quality movie file and recommends replacement workflows', async () => {
+    installFetchMock([
+      route('GET', '/movie?tmdbId=603', {
+        json: [
+          {
+            ...radarrMovie()[0],
+            movieFile: {
+              id: 7,
+              relativePath: 'The Matrix (1999)/Matrix.avi',
+              size: 900 * 1024 ** 2,
+              quality: { quality: { name: 'DVD' } },
+            },
+          },
+        ],
+      }),
+    ]);
+
+    const result = await invoke(radarr_file_quality_check, { tmdbId: 603 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(parsed.summary).toMatch(/1 Radarr quality issue/);
+    expect(parsed.currentFile).toMatchObject({
+      quality: 'DVD',
+      qualityRank: 1000,
+    });
+    expect(parsed.flags).toEqual(['quality below 1080p']);
+    expect(parsed.needsUpgrade).toBe(true);
+    expect(parsed.recommendedActions[0]).toMatchObject({
+      label: 'Inspect replacement candidates',
+      tool: 'radarr_replacement_candidates',
+      args: { tmdbId: 603 },
+    });
+  });
+
+  it('does not flag a movie file that meets the requested floor', async () => {
+    installFetchMock([
+      route('GET', '/movie?tmdbId=603', { json: radarrMovie() }),
+    ]);
+
+    const result = await invoke(radarr_file_quality_check, {
+      tmdbId: 603,
+      minQuality: '720p',
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(parsed.summary).toMatch(/0 Radarr quality issue/);
+    expect(parsed.flags).toEqual([]);
+    expect(parsed.needsUpgrade).toBe(false);
   });
 });
 

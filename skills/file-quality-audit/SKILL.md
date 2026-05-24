@@ -47,26 +47,28 @@ Do not overstate fields Plex did not report. Say "not reported" rather than gues
 
 Quality inspection is read-only. If the user wants to replace files:
 
-- For movies, use `overseerr_search` to get the TMDb ID, then `radarr_replacement_candidates` before `radarr_replace_movie`.
-- For TV, use `overseerr_search` to get the TMDb ID, then `sonarr_replace` with the exact season and episode from the audit item.
+- For movies, use `overseerr_search` to get the TMDb ID, then `radarr_file_quality_check` and `radarr_replacement_candidates` before `radarr_replace_movie`.
+- For TV, use `overseerr_search` to get the TMDb ID, then `sonarr_file_quality_check` for the requested series/season/episode. Use `sonarr_episode_replacement_candidates` before `sonarr_replace` when targeting one exact episode.
 - State the specific file/title/episode evidence before calling a mutating replacement tool.
 - If Radarr's top scored candidate is below the current/default quality floor, do not call `radarr_replace_movie` unless the user explicitly accepts that downgrade.
 - If Radarr's top scored candidate is poor but another candidate is better, recommend one candidate with a short reason using its quality, size, score, age, indexer, and title. After the user authorizes that recommendation, call `radarr_replace_movie` with `selectedReleaseGuid` and `selectedReleaseIndexerId`.
+- If Sonarr has no acceptable automatic candidate for an episode but a rejected/manual candidate looks right, recommend one candidate with a short reason using its quality, size, score, age, indexer, and title. After the user authorizes that recommendation, call `sonarr_replace` with `selectedReleaseGuid` and `selectedReleaseIndexerId`.
+- For a whole TV season with multiple bad or missing episodes, offer a whole-season automatic search by calling `sonarr_replace` with `seasonNumber` and no `episodeNumber` after user confirmation. Use per-episode candidate overrides only for episodes where the profile search would be poor or blocked.
 - Let the normal confirmation gate handle approval.
 
-When showing replacement choices, use radio-style lines:
+When showing replacement choices in assistant text, use numbered lines and tell the user to reply with the number or label. Do not use radio buttons like `( )` or `(•)`; they look selectable but the REPL cannot move a cursor between them.
 
 ```text
-(•) Recommended: 1080p BluRay, 14.9 GiB, score +400 — better quality floor match
-( ) Automatic top: DVD, 833.9 MiB, score +20000 — profile score is high but quality is lower
-( ) Skip replacement for now
+1. Recommended: 1080p BluRay, 14.9 GiB, score +400 - better quality floor match
+2. Automatic top: DVD, 833.9 MiB, score +20000 - profile score is high but quality is lower
+3. Skip replacement for now
 ```
 
 Keep each option to one line where possible.
 
-For yes/no choices about deletion or replacement, show No as the selected default unless the user already asked for that exact action:
+For yes/no choices about deletion or replacement in assistant text, show the non-destructive option first unless the user already asked for that exact action:
 
 ```text
-( ) Yes, delete the current file and grab the recommended release
-(•) No, leave the current file in place
+1. Recommended: No, leave the current file in place
+2. Yes, delete the current file and grab the recommended release
 ```

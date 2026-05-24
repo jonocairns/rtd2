@@ -27,8 +27,18 @@ import {
   plex_get_matches,
   plex_apply_match,
 } from './tools/plex.js';
-import { radarr_replace_movie, radarr_delete_movie, radarr_replacement_candidates } from './tools/radarr.js';
-import { sonarr_replace, sonarr_delete_series } from './tools/sonarr.js';
+import {
+  radarr_replace_movie,
+  radarr_delete_movie,
+  radarr_replacement_candidates,
+  radarr_file_quality_check,
+} from './tools/radarr.js';
+import {
+  sonarr_replace,
+  sonarr_delete_series,
+  sonarr_episode_replacement_candidates,
+  sonarr_file_quality_check,
+} from './tools/sonarr.js';
 import type { RuntimeTool } from './tool-runtime.js';
 
 export const baseToolDescriptors = [
@@ -57,9 +67,12 @@ export const baseToolDescriptors = [
   plex_quality_audit,
   plex_get_matches,
   plex_apply_match,
+  radarr_file_quality_check,
   radarr_replacement_candidates,
   radarr_replace_movie,
   radarr_delete_movie,
+  sonarr_file_quality_check,
+  sonarr_episode_replacement_candidates,
   sonarr_replace,
   sonarr_delete_series,
 ] as RuntimeTool[];

@@ -37,7 +37,12 @@ function createUserPrompt(rl: readline.Interface, spinner: Spinner): PromptContr
       await readyForInput;
       spinner.stop();
 
+      // rl.question auto-resumes the interface. We pause again immediately
+      // after the line resolves so keystrokes typed while the agent runs are
+      // buffered (and don't get echoed interleaved with streaming output);
+      // they get flushed cleanly into the next prompt instead.
       const line: string = await new Promise((resolve) => rl.question(PROMPT, resolve));
+      rl.pause();
       const trimmed = line.trim();
       if (trimmed === '') continue;
       if (trimmed === 'exit' || trimmed === 'quit') return;
@@ -76,6 +81,10 @@ export async function startRepl({
     input: process.stdin,
     output: process.stdout,
   });
+  // Start paused — `rl.question` auto-resumes when we want input, and we
+  // re-pause as soon as the line resolves so input doesn't get captured /
+  // echoed while the agent is streaming output.
+  rl.pause();
 
   banner({ version, toolCount: TOOL_COUNT, yolo });
 

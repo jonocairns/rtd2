@@ -1,90 +1,104 @@
-# media-agent
+# RTD2
 
-A REPL-based AI agent for managing a self-hosted media setup (Plex + Overseerr/Seerr + mdblist), built on Vercel AI SDK Core.
+A terminal agent for managing a Plex library backed by Overseerr, Radarr, Sonarr, and mdblist.
 
-See [PRD.md](PRD.md) for the full design.
+It can find things to watch, inspect low-quality downloads, re-grab bad files, fix Plex matches, and manage requests. Destructive actions go through a confirmation prompt.
 
-## Setup
+![media-agent CLI](rtd2.png)
 
-This project uses [Nix flakes](https://nixos.wiki/wiki/Flakes) for the dev environment and [pnpm](https://pnpm.io/) for package management.
+## Prompts
 
-### 1. Enter the dev shell
+```text
+find low-quality movie files and show me the best upgrade candidates before deleting anything
+```
+
+```text
+check Severance season 1 for missing or low-quality episodes, then tell me whether to run a season search or fix episodes one by one
+```
+
+```text
+what should I watch tonight from my unwatched library, something tense but not horror?
+```
+
+```text
+request The Insider if it is not already in my library or pending
+```
+
+```text
+what am I missing by David Fincher?
+```
+
+```text
+where can I stream Anatomy of a Fall before I request it?
+```
+
+```text
+show me pending requests and approve the good ones
+```
+
+```text
+this Plex match is wrong for Solaris, show me the alternate matches before changing it
+```
+
+```text
+sync my mdblist watchlist with Overseerr
+```
+
+```text
+what was recently added to Plex that I have not watched yet?
+```
+
+```text
+show me my recent watch history and recommend something similar from the library
+```
+
+```text
+find highly rated sci-fi movies I am missing
+```
+
+```text
+how many requests do I have left this month?
+```
+
+```text
+report a video quality issue for Gods and Monsters, then show the safest regrab options
+```
+
+```text
+remove this bad Radarr movie entry but keep the file on disk
+```
+
+```text
+any requests from last month that still have not downloaded?
+```
+
+```text
+what is in my library by Denis Villeneuve, and which of his am I missing?
+```
+
+```text
+my library is getting huge, what unwatched stuff looks safe to prune?
+```
+
+```text
+add Dune: Part Three when it is available
+```
+
+## Getting Started
 
 ```bash
 nix develop
-```
-
-Or if you have [direnv](https://direnv.net/) installed, just `cd` into the directory and `direnv allow` once — the included `.envrc` will load the flake automatically.
-
-### 2. Install dependencies
-
-```bash
 pnpm install
-```
-
-### 3. Configure credentials
-
-```bash
 cp .env.example .env
 $EDITOR .env
-```
-
-How to obtain each credential:
-
-| Variable | How to get it |
-|---|---|
-| `MODEL_PROVIDER` | `openai` or `anthropic`; defaults to OpenAI when `OPENAI_API_KEY` is set |
-| `MODEL_NAME` | Optional model override; defaults to `gpt-5.2` for OpenAI or `claude-sonnet-4-6` for Anthropic |
-| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) → API keys |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API Keys; required when `MODEL_PROVIDER=anthropic` |
-| `OVERSEERR_API_KEY` | Overseerr/Seerr UI → Settings → General → API Key |
-| `PLEX_URL` | Your Plex server URL — local typically `http://<host>:32400` |
-| `PLEX_TOKEN` | See the [Plex docs](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) — easiest method is browser dev tools while logged into Plex Web |
-| `MDBLIST_API_KEY` | [mdblist.com](https://mdblist.com) → your profile → API Key |
-
-### 4. Run
-
-```bash
-pnpm dev          # development (tsx, no build step)
-pnpm build        # compile to dist/
-pnpm start        # run compiled
-pnpm typecheck    # type-check src + tests + evals
-pnpm test         # run unit tests (vitest, mocked fetch)
-pnpm eval         # run scripted-conversation evals once (hits the configured model provider, costs API credits)
-pnpm eval:ui      # serve the evalite UI against existing run history (no new run, no API spend)
-```
-
-Evals run via [evalite](https://www.npmjs.com/package/evalite) and need a real model provider API key in `.env` or the shell. The runner mocks Plex/Overseerr/Radarr/Sonarr but lets the configured model API through, so each scenario is a genuine model invocation. Run history is persisted at `node_modules/.evalite/cache.sqlite`.
-
-First run only: `pnpm approve-builds` and accept `better-sqlite3` (evalite's storage backend). See [GUARDRAILS.md §7](GUARDRAILS.md) for the design.
-
-## Usage
-
-Launch the REPL:
-
-```bash
+# fill in the env
 pnpm dev
 ```
 
-Then talk to the agent about your library. Examples:
+Useful commands:
 
+```bash
+pnpm test
+pnpm typecheck
+pnpm build
 ```
-> what should I watch tonight, something like Severance but lighter?
-> sync my mdblist rt-m into overseerr
-> show me requests from last month that haven't downloaded yet
-> what's in my library by Villeneuve?
-> find low-quality movie files, especially 720p or non-HEVC encodes
-```
-
-The agent will ask for confirmation before making mutating changes. Pass `--yolo` to skip confirmation.
-
-The CLI keeps a small local SQLite database at `data/media-agent.sqlite` for reusable tool metadata such as TMDb title lookups. The database is runtime state and is gitignored.
-
-## Project structure
-
-See [PRD.md §8](PRD.md#8-file-layout) for the full layout. Top level:
-
-- `src/` — TypeScript source
-- `skills/` — agent skills (markdown with YAML frontmatter)
-- `flake.nix` — Nix dev shell definition
-- `PRD.md` — product requirements / design doc

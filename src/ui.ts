@@ -1,7 +1,23 @@
-import { marked } from 'marked';
+import { marked, type Tokens } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 
 marked.use(markedTerminal({ tab: 0 }) as never);
+
+// marked-terminal v7's `text` renderer returns the raw `text.text` and ignores
+// the parsed inline `tokens`, so inline formatting (e.g. **bold**) inside
+// tight list items leaks through as literal markdown and ends up on its own
+// line. Override `text` to recurse into the inline tokens when present.
+marked.use({
+  renderer: {
+    text(token: Tokens.Text | Tokens.Escape | Tokens.Tag) {
+      const innerTokens = (token as Tokens.Text).tokens;
+      if (innerTokens && innerTokens.length > 0) {
+        return this.parser.parseInline(innerTokens);
+      }
+      return token.text;
+    },
+  },
+});
 
 const isTTY = process.stdout.isTTY;
 const c = (code: string) => (isTTY ? `\x1b[${code}m` : '');
@@ -53,11 +69,20 @@ export function banner(opts: { version: string; toolCount: number; yolo: boolean
 
 export const PROMPT = `${colors.cyan}❯${colors.reset} `;
 
+// Rejoin list items the model wrote with the marker on its own line
+// (`1.\n**Title** body` becomes `1. **Title** body`) so marked sees a real list.
+function repairBrokenLists(text: string): string {
+  return text
+    .replace(/^([^\S\r\n]*(?:\d+\.|[-*+]))[^\S\r\n]*\r?\n[^\S\r\n]*(?=\S)/gm, '$1 ')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
 export function renderMarkdown(text: string): string {
+  const normalized = repairBrokenLists(text);
   try {
-    return String(marked.parse(text)).replace(/\n+$/, '');
+    return String(marked.parse(normalized)).replace(/\n+$/, '');
   } catch {
-    return text;
+    return normalized.replace(/\n+$/, '');
   }
 }
 
@@ -136,8 +161,8 @@ export function yesNoChoices(opts?: { yesLabel?: string; noLabel?: string; recom
   const yes = opts?.yesLabel ?? 'Yes, proceed';
   const no = opts?.noLabel ?? 'No, cancel';
   return [
-    `${recommended === 'yes' ? '(•)' : '( )'} ${yes}`,
-    `${recommended === 'no' ? '(•)' : '( )'} ${no}`,
+    `y - ${yes}${recommended === 'yes' ? ' (recommended)' : ''}`,
+    `N - ${no}${recommended === 'no' ? ' (default)' : ''}`,
   ];
 }
 

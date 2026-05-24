@@ -102,6 +102,13 @@ function qualityFloorName(rank: number | null): string | null {
   return 'DVD/480p';
 }
 
+function qualityFloorRank(name?: '2160p' | '1080p' | '720p' | '480p' | 'dvd'): number {
+  if (name === '2160p') return 4000;
+  if (name === '720p') return 2000;
+  if (name === '480p' || name === 'dvd') return 1000;
+  return 3000;
+}
+
 function sizeGiB(size?: number): number | null {
   return typeof size === 'number' ? Number((size / 1024 ** 3).toFixed(2)) : null;
 }
@@ -374,6 +381,72 @@ export const radarr_replacement_candidates = tool(
           acceptableCandidates[0]?.qualityRank !== undefined &&
           acceptableCandidates[0].qualityRank < (currentRank ?? 3000),
       },
+    });
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+export const radarr_file_quality_check = tool(
+  'radarr_file_quality_check',
+  'Read-only quality check for one Radarr movie. Shows current file quality, flags missing or low-quality files, and points to automatic or selected-release replacement workflows.',
+  {
+    tmdbId: z.number().int().describe('TMDb ID of the movie'),
+    minQuality: z
+      .enum(['2160p', '1080p', '720p', '480p', 'dvd'])
+      .optional()
+      .describe('Quality floor for flagging the movie file (default 1080p).'),
+  },
+  safe(async ({ tmdbId, minQuality }) => {
+    const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
+    const movie = matches[0];
+    if (!movie) {
+      throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
+    }
+
+    const floorRank = qualityFloorRank(minQuality);
+    const currentQuality = movie.movieFile?.quality?.quality?.name ?? null;
+    const currentRank = qualityRank(currentQuality);
+    const flags = [
+      ...(!movie.hasFile ? ['missing file'] : []),
+      ...(currentRank !== null && currentRank < floorRank ? [`quality below ${qualityFloorName(floorRank)}`] : []),
+      ...(movie.hasFile && currentRank === null ? ['unknown quality'] : []),
+    ];
+
+    return envelope(`${flags.length} Radarr quality issue(s) for ${movie.title} (${movie.year})`, [], {
+      movie: {
+        id: movie.id,
+        title: movie.title,
+        year: movie.year,
+        tmdbId: movie.tmdbId,
+      },
+      currentFile: movie.movieFile
+        ? {
+            path: movie.movieFile.relativePath ?? null,
+            quality: currentQuality,
+            qualityRank: currentRank,
+            sizeGiB: sizeGiB(movie.movieFile.size),
+          }
+        : null,
+      flags,
+      needsUpgrade: flags.length > 0,
+      rules: {
+        minQuality: qualityFloorName(floorRank),
+        minQualityRank: floorRank,
+      },
+      recommendedActions: [
+        {
+          label: 'Inspect replacement candidates',
+          tool: 'radarr_replacement_candidates',
+          args: { tmdbId },
+          when: 'Use before deleting or grabbing a selected release.',
+        },
+        {
+          label: 'Automatic movie search',
+          tool: 'radarr_replace_movie',
+          args: { tmdbId, keepFile: true },
+          when: 'Use when the Radarr profile is trusted and a normal MoviesSearch should find an upgrade.',
+        },
+      ],
     });
   }),
   { annotations: { readOnlyHint: true } }
