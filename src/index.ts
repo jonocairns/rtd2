@@ -5,7 +5,7 @@ import { validateConnection as validateRadarr } from './tools/radarr.js';
 import { validateConnection as validateSonarr } from './tools/sonarr.js';
 import { startRepl } from './repl.js';
 import { AuditLog } from './audit.js';
-import { ok, info, error } from './ui.js';
+import type { StartupLine } from './app.js';
 
 const VERSION = process.env.npm_package_version ?? '0.1.0';
 
@@ -18,35 +18,44 @@ function parseArgs(argv: string[]): { yolo: boolean } {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
-  try {
-    await validateOverseerr();
-    ok('Overseerr connected');
-  } catch (e) {
-    error(`Overseerr connection failed: ${(e as Error).message}`);
-    error('Check OVERSEERR_URL and OVERSEERR_API_KEY in .env');
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write(
+      '✗ rtd2 is an interactive TTY app. Run it directly in a terminal — piping stdin/stdout is not supported.\n'
+    );
     process.exit(1);
   }
 
-  if (env.RADARR_URL && env.RADARR_API_KEY) {
+  const startupLines: StartupLine[] = [];
+  let fatal: string | null = null;
+
+  try {
+    await validateOverseerr();
+    startupLines.push({ text: 'Overseerr connected', tone: 'ok' });
+  } catch (e) {
+    fatal = `Overseerr connection failed: ${(e as Error).message}\nCheck OVERSEERR_URL and OVERSEERR_API_KEY in .env`;
+  }
+
+  if (!fatal && env.RADARR_URL && env.RADARR_API_KEY) {
     try {
       await validateRadarr();
-      ok('Radarr connected');
+      startupLines.push({ text: 'Radarr connected', tone: 'ok' });
     } catch (e) {
-      error(`Radarr connection failed: ${(e as Error).message}`);
-      error('Check RADARR_URL and RADARR_API_KEY in .env');
-      process.exit(1);
+      fatal = `Radarr connection failed: ${(e as Error).message}\nCheck RADARR_URL and RADARR_API_KEY in .env`;
     }
   }
 
-  if (env.SONARR_URL && env.SONARR_API_KEY) {
+  if (!fatal && env.SONARR_URL && env.SONARR_API_KEY) {
     try {
       await validateSonarr();
-      ok('Sonarr connected');
+      startupLines.push({ text: 'Sonarr connected', tone: 'ok' });
     } catch (e) {
-      error(`Sonarr connection failed: ${(e as Error).message}`);
-      error('Check SONARR_URL and SONARR_API_KEY in .env');
-      process.exit(1);
+      fatal = `Sonarr connection failed: ${(e as Error).message}\nCheck SONARR_URL and SONARR_API_KEY in .env`;
     }
+  }
+
+  if (fatal) {
+    process.stderr.write(`✗ ${fatal}\n`);
+    process.exit(1);
   }
 
   const audit = new AuditLog();
@@ -56,12 +65,12 @@ async function main() {
     yolo: opts.yolo,
     version: VERSION,
   });
-  info(`Audit log: ${audit.path}`);
+  startupLines.push({ text: `Audit log: ${audit.path}`, tone: 'info' });
 
-  await startRepl({ ...opts, version: VERSION, audit });
+  await startRepl({ ...opts, version: VERSION, audit, startupLines });
 }
 
 main().catch((e) => {
-  error(`Fatal: ${(e as Error).message}`);
+  process.stderr.write(`✗ Fatal: ${(e as Error).message}\n`);
   process.exit(1);
 });

@@ -116,6 +116,9 @@ interface SearchResult {
   name?: string;
   releaseDate?: string;
   firstAirDate?: string;
+  voteAverage?: number;
+  voteCount?: number;
+  popularity?: number;
   mediaInfo?: { id?: number; status?: number };
 }
 
@@ -595,6 +598,108 @@ export const overseerr_discover = tool(
     const missing = hits.filter((h) => h.libraryStatus === 'missing').length;
     return envelope(
       `${plural(hits.length, `${type} ${genre} title`)} (${missing} not in library)`,
+      hits
+    );
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+export const overseerr_discover_hidden_gems = tool(
+  'overseerr_discover_hidden_gems',
+  'Discover "hidden gem" movies or TV shows: well-loved on TMDB (high voteAverage) but not yet broadly popular (moderate voteCount). Useful for suggesting new things to request that are unlikely to already be on the library. Pages through TMDB discover sorted by rating and filters client-side so results are robust across Overseerr versions.',
+  {
+    mediaType: mediaTypeSchema.optional().describe('movie or tv (default movie)'),
+    genre: z
+      .string()
+      .optional()
+      .describe('Optional genre name (e.g. horror, sci-fi). Same vocabulary as overseerr_discover.'),
+    minVoteAverage: z
+      .number()
+      .min(0)
+      .max(10)
+      .optional()
+      .describe('Minimum TMDB rating (default 7.5). Items below this are filtered out.'),
+    minVoteCount: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Minimum TMDB vote count (default 200). Filters out niche items with too-few votes.'),
+    maxVoteCount: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe('Maximum TMDB vote count (default 5000). Above this an item is too widely-known to count as a "hidden gem".'),
+    includeInLibrary: z
+      .boolean()
+      .optional()
+      .describe('Include items already in the Plex library (default false; hidden gems usually means new finds).'),
+    take: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe('Max results to return after filtering (default 15)'),
+  },
+  safe(async ({ mediaType, genre, minVoteAverage, minVoteCount, maxVoteCount, includeInLibrary, take }) => {
+    const type = (normalizeMediaType(mediaType) as 'movie' | 'tv' | undefined) ?? 'movie';
+    const minRating = minVoteAverage ?? 7.5;
+    const minVotes = minVoteCount ?? 200;
+    const maxVotes = maxVoteCount ?? 5000;
+    const limit = take ?? 15;
+    const wantInLibrary = includeInLibrary ?? false;
+
+    if (minVotes > maxVotes) {
+      throw new Error(`minVoteCount (${minVotes}) must be ≤ maxVoteCount (${maxVotes}).`);
+    }
+
+    const basePath = `/discover/${type === 'movie' ? 'movies' : 'tv'}`;
+    const baseParams = new URLSearchParams({ sortBy: 'vote_average.desc' });
+    if (genre) baseParams.set('genre', String(genreIdFor(type, genre)));
+
+    const seen = new Set<number>();
+    const passing: SearchResult[] = [];
+    // Walk a few pages so the upper-vote-count filter doesn't starve us when
+    // the top of vote_average.desc is dominated by mega-popular titles.
+    const MAX_PAGES = 5;
+    for (let page = 1; page <= MAX_PAGES && passing.length < limit; page++) {
+      const params = new URLSearchParams(baseParams);
+      params.set('page', String(page));
+      const data = await api<{ results: SearchResult[]; totalPages?: number }>(
+        `${basePath}?${params.toString()}`
+      );
+      const results = data.results ?? [];
+      if (results.length === 0) break;
+      for (const r of results) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        const vAvg = r.voteAverage ?? 0;
+        const vCnt = r.voteCount ?? 0;
+        if (vAvg < minRating) continue;
+        if (vCnt < minVotes || vCnt > maxVotes) continue;
+        const status = r.mediaInfo?.status ? (statusMap[r.mediaInfo.status] ?? 'unknown') : 'missing';
+        if (!wantInLibrary && status !== 'missing') continue;
+        passing.push(r);
+        if (passing.length >= limit) break;
+      }
+      if (typeof data.totalPages === 'number' && page >= data.totalPages) break;
+    }
+
+    const hits = passing.map((r) => ({
+      tmdbId: r.id,
+      mediaType: r.mediaType,
+      title: r.title ?? r.name ?? '(unknown)',
+      year: (r.releaseDate ?? r.firstAirDate ?? '').slice(0, 4) || null,
+      voteAverage: r.voteAverage ?? null,
+      voteCount: r.voteCount ?? null,
+      libraryStatus: r.mediaInfo?.status ? (statusMap[r.mediaInfo.status] ?? 'unknown') : 'missing',
+    }));
+
+    const genreNote = genre ? `, ${genre}` : '';
+    return envelope(
+      `${plural(hits.length, `${type} hidden gem`)} (rating ≥ ${minRating}, votes ${minVotes}-${maxVotes}${genreNote})`,
       hits
     );
   }),

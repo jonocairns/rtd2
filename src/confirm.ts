@@ -1,5 +1,4 @@
-import type readline from 'node:readline';
-import { box, colors, Spinner, stripAnsi, yesNoChoices } from './ui.js';
+import { stripAnsi } from './ui.js';
 import type { AuditLog } from './audit.js';
 import { resolveCreateRequest, resolveRequestAction } from './tools/overseerr.js';
 import { guardReplaceMovie, resolveDeleteMovie, resolveReplaceMovie } from './tools/radarr.js';
@@ -53,11 +52,26 @@ const MUTATING_TOOLS = new Set([
   'mcp__media-tools__overseerr_report_issue',
 ]);
 
+export interface ConfirmRequest {
+  displayName: string;
+  input: unknown;
+  lines: string[];
+}
+
+export interface BlockedNotice {
+  title: string;
+  lines: string[];
+}
+
 export interface ConfirmGateOptions {
-  rl: readline.Interface;
-  spinner: Spinner;
-  yolo: boolean;
+  // Function so the App can toggle yolo mid-session via /yolo without
+  // re-creating the gate. Read at every tool call.
+  isYolo: () => boolean;
   audit: AuditLog;
+  // Prompt the user with the resolved confirm box and return whether they approved.
+  prompt: (req: ConfirmRequest) => Promise<boolean>;
+  // Display a guard-block notice to the user (no prompt, just informational).
+  notifyBlocked: (notice: BlockedNotice) => void;
 }
 
 export type ToolDecision =
@@ -66,44 +80,36 @@ export type ToolDecision =
 
 export type CanUseTool = (toolName: string, input: unknown) => Promise<ToolDecision>;
 
-export function createConfirmGate({ rl, spinner, yolo, audit }: ConfirmGateOptions): CanUseTool {
+export function createConfirmGate({ isYolo, audit, prompt, notifyBlocked }: ConfirmGateOptions): CanUseTool {
   return async (toolName, input) => {
-    if (yolo || !MUTATING_TOOLS.has(toolName)) {
+    if (isYolo() || !MUTATING_TOOLS.has(toolName)) {
       return { behavior: 'allow' };
     }
-
-    spinner.stop();
 
     const displayName = toolName.replace(/^mcp__[^_]+__/, '');
     const resolver = RESOLVERS[toolName];
 
     let lines: string[];
-    spinner.start('resolving');
     try {
       lines = resolver
         ? await resolver(input as Record<string, unknown>)
         : [
-            `${colors.bold}${displayName}${colors.reset}`,
-            ...JSON.stringify(input, null, 2)
-              .split('\n')
-              .map((l) => `${colors.dim}${l}${colors.reset}`),
+            displayName,
+            ...JSON.stringify(input, null, 2).split('\n'),
           ];
     } catch (e) {
       lines = [
-        `${colors.bold}${displayName}${colors.reset}`,
-        `${colors.red}(could not resolve details: ${(e as Error).message})${colors.reset}`,
-        ...JSON.stringify(input, null, 2)
-          .split('\n')
-          .map((l) => `${colors.dim}${l}${colors.reset}`),
+        displayName,
+        `(could not resolve details: ${(e as Error).message})`,
+        ...JSON.stringify(input, null, 2).split('\n'),
       ];
     }
-    spinner.stop();
 
     if (displayName === 'radarr_replace_movie') {
       try {
         const guard = await guardReplaceMovie(input as Parameters<typeof guardReplaceMovie>[0]);
         if (!guard.ok) {
-          box('Replacement blocked', guard.lines, colors.red);
+          notifyBlocked({ title: 'Replacement blocked', lines: guard.lines });
           audit.append({
             type: 'confirm_decision',
             ts: new Date().toISOString(),
@@ -112,16 +118,11 @@ export function createConfirmGate({ rl, spinner, yolo, audit }: ConfirmGateOptio
             resolved: guard.lines.map(stripAnsi),
             decision: 'declined',
           });
-          spinner.start('processing');
-          return {
-            behavior: 'deny',
-            message: guard.message,
-          };
+          return { behavior: 'deny', message: guard.message };
         }
       } catch {
-        // The resolver already surfaced lookup failures. Let the normal
-        // confirmation path handle unusual preflight errors rather than hiding
-        // the original operation from the user.
+        // Resolver already surfaced lookup failures; let the normal confirm
+        // path handle unusual preflight errors rather than hiding the operation.
       }
     }
 
@@ -129,7 +130,7 @@ export function createConfirmGate({ rl, spinner, yolo, audit }: ConfirmGateOptio
       try {
         const guard = await guardReplaceEpisode(input as Parameters<typeof guardReplaceEpisode>[0]);
         if (!guard.ok) {
-          box('Replacement blocked', guard.lines, colors.red);
+          notifyBlocked({ title: 'Replacement blocked', lines: guard.lines });
           audit.append({
             type: 'confirm_decision',
             ts: new Date().toISOString(),
@@ -138,50 +139,25 @@ export function createConfirmGate({ rl, spinner, yolo, audit }: ConfirmGateOptio
             resolved: guard.lines.map(stripAnsi),
             decision: 'declined',
           });
-          spinner.start('processing');
-          return {
-            behavior: 'deny',
-            message: guard.message,
-          };
+          return { behavior: 'deny', message: guard.message };
         }
       } catch {
-        // The resolver already surfaced lookup failures. Let the normal
-        // confirmation path handle unusual preflight errors.
+        // Same rationale as the radarr branch above.
       }
     }
 
-    const choiceLines = yesNoChoices({
-      yesLabel: 'Yes, run this exact tool call',
-      noLabel: 'No, cancel (default)',
-      recommended: 'no',
-    });
-
-    box('Confirmation required', [
-      ...lines,
-      '',
-      ...choiceLines,
-    ]);
-
-    const answer: string = await new Promise((resolve) =>
-      rl.question(`${colors.yellow}Choose [y/N] ${colors.reset}`, resolve)
-    );
-    rl.pause();
-
-    const proceed = answer.trim().toLowerCase() === 'y';
-    spinner.start('processing');
+    const approved = await prompt({ displayName, input, lines });
 
     audit.append({
       type: 'confirm_decision',
       ts: new Date().toISOString(),
       tool: displayName,
       args: input,
-      resolved: [...lines, '', ...choiceLines].map(stripAnsi),
-      decision: proceed ? 'approved' : 'declined',
+      resolved: lines.map(stripAnsi),
+      decision: approved ? 'approved' : 'declined',
     });
 
-    if (proceed) {
-      return { behavior: 'allow' };
-    }
+    if (approved) return { behavior: 'allow' };
     return {
       behavior: 'deny',
       message: 'User declined. Do not retry without asking the user first.',

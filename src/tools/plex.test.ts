@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   plex_apply_match,
+  plex_collecting_dust,
+  plex_list_users,
   plex_quality_audit,
   plex_quality_profile,
   plex_search,
+  plex_similar,
   plex_unwatched,
+  plex_watch_history,
 } from './plex.js';
 import { installFetchMock, invoke, route } from './_testing.js';
 import { resetIdempotencyForTests } from './idempotency.js';
@@ -363,5 +367,236 @@ describe('plex_quality_audit', () => {
     expect(url.searchParams.get('type')).toBe('4');
     expect(parsed.items[0].title).toBe('Severance S01E01 - Pilot');
     expect(parsed.items[0].flags).toEqual(['resolution below 720p']);
+  });
+});
+
+describe('plex_list_users', () => {
+  it('returns id and name for each Plex account', async () => {
+    installFetchMock([
+      route('GET', '/accounts', {
+        json: {
+          MediaContainer: {
+            Account: [
+              { id: 1, name: 'admin', title: 'Admin' },
+              { id: 42, name: 'Feelsgooodjpeg', title: 'Feels' },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_list_users, {});
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(parsed.summary).toMatch(/2 Plex accounts/);
+    expect(parsed.items).toEqual([
+      { id: 1, name: 'admin' },
+      { id: 42, name: 'Feelsgooodjpeg' },
+    ]);
+  });
+});
+
+describe('plex_watch_history', () => {
+  it('returns server-wide history when no user is given', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/status/sessions/history/all', {
+        json: {
+          MediaContainer: {
+            Metadata: [{ title: 'Dune', type: 'movie', year: 2021, viewedAt: 1700000000 }],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_watch_history, { count: 5 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    const historyCall = calls.find((c) => c.url.includes('/status/sessions/history/all'));
+    expect(historyCall).toBeDefined();
+    const url = new URL(historyCall?.url ?? '');
+    expect(url.searchParams.has('accountID')).toBe(false);
+    expect(url.searchParams.get('X-Plex-Container-Size')).toBe('5');
+    expect(parsed.summary).toBe('1 recent watch event');
+    expect(parsed.items[0].title).toBe('Dune');
+  });
+
+  it('resolves a username to accountID and scopes history to that user', async () => {
+    const { calls } = installFetchMock([
+      // Most specific first.
+      route('GET', '/status/sessions/history/all', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              {
+                type: 'episode',
+                grandparentTitle: 'House of the Dragon',
+                parentIndex: 2,
+                index: 1,
+                title: 'A Son for a Son',
+                viewedAt: 1700000000,
+              },
+            ],
+          },
+        },
+      }),
+      route('GET', '/accounts', {
+        json: {
+          MediaContainer: {
+            Account: [
+              { id: 1, name: 'admin', title: 'Admin' },
+              { id: 42, name: 'Feelsgooodjpeg', title: 'Feels' },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_watch_history, { user: 'Feelsgooodjpeg' });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    const historyCall = calls.find((c) => c.url.includes('/status/sessions/history/all'));
+    const url = new URL(historyCall?.url ?? '');
+    expect(url.searchParams.get('accountID')).toBe('42');
+
+    expect(parsed.summary).toBe('1 recent watch event for Feelsgooodjpeg (accountID 42)');
+    expect(parsed.items[0].title).toBe('House of the Dragon S02E01 – A Son for a Son');
+  });
+
+  it('accepts a numeric user id directly', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/status/sessions/history/all', {
+        json: { MediaContainer: { Metadata: [] } },
+      }),
+      route('GET', '/accounts', {
+        json: {
+          MediaContainer: {
+            Account: [{ id: 42, name: 'Feelsgooodjpeg', title: 'Feels' }],
+          },
+        },
+      }),
+    ]);
+
+    await invoke(plex_watch_history, { user: '42' });
+
+    const historyCall = calls.find((c) => c.url.includes('/status/sessions/history/all'));
+    const url = new URL(historyCall?.url ?? '');
+    expect(url.searchParams.get('accountID')).toBe('42');
+  });
+
+  it('errors with the known account list when the username does not match', async () => {
+    installFetchMock([
+      route('GET', '/accounts', {
+        json: {
+          MediaContainer: {
+            Account: [{ id: 1, name: 'admin', title: 'Admin' }],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_watch_history, { user: 'ghost' });
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    const parsed = JSON.parse(text) as { error: string };
+    expect(parsed.error).toMatch(/No Plex account matches "ghost"/);
+    expect(parsed.error).toMatch(/admin/);
+  });
+});
+
+describe('plex_collecting_dust', () => {
+  it('queries unwatched sorted oldest-first and surfaces ratingKeys', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/1/unwatched', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              { ratingKey: '11', title: 'Forgotten Gem', type: 'movie', year: 2009, addedAt: 1500000000, audienceRating: 8.4 },
+              { ratingKey: '12', title: 'Forgotten Dud', type: 'movie', year: 2010, addedAt: 1500050000, audienceRating: 5.1 },
+            ],
+          },
+        },
+      }),
+      route('GET', '/library/sections', {
+        json: { MediaContainer: { Directory: [{ key: '1', type: 'movie', title: 'Movies' }] } },
+      }),
+    ]);
+
+    const result = await invoke(plex_collecting_dust, { section: 'movies', count: 5 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    const unwatchedCall = calls.find((c) => c.url.includes('/unwatched'));
+    const url = new URL(unwatchedCall?.url ?? '');
+    expect(url.searchParams.get('sort')).toBe('addedAt:asc');
+    expect(url.searchParams.get('X-Plex-Container-Size')).toBe('5');
+
+    expect(parsed.summary).toMatch(/2 dusty unwatched items \(movies\)/);
+    expect(parsed.items[0]).toMatchObject({
+      ratingKey: '11',
+      title: 'Forgotten Gem',
+      audienceRating: 8.4,
+    });
+  });
+
+  it('drops items below minRating and overfetches to keep the result count', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/1/unwatched', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              { ratingKey: '1', title: 'Cheap A', type: 'movie', year: 2000, addedAt: 1, audienceRating: 5 },
+              { ratingKey: '2', title: 'Great B', type: 'movie', year: 2001, addedAt: 2, audienceRating: 8.5 },
+              { ratingKey: '3', title: 'Cheap C', type: 'movie', year: 2002, addedAt: 3, audienceRating: 4 },
+              { ratingKey: '4', title: 'Unrated D', type: 'movie', year: 2003, addedAt: 4 },
+            ],
+          },
+        },
+      }),
+      route('GET', '/library/sections', {
+        json: { MediaContainer: { Directory: [{ key: '1', type: 'movie', title: 'Movies' }] } },
+      }),
+    ]);
+
+    const result = await invoke(plex_collecting_dust, { section: 'movies', count: 3, minRating: 7 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    const unwatchedCall = calls.find((c) => c.url.includes('/unwatched'));
+    const url = new URL(unwatchedCall?.url ?? '');
+    // Overfetched to 4x the requested limit (3*4=12).
+    expect(url.searchParams.get('X-Plex-Container-Size')).toBe('12');
+
+    expect(parsed.summary).toMatch(/1 dusty unwatched item \(movies, audienceRating ≥ 7\)/);
+    expect(parsed.items).toEqual([
+      expect.objectContaining({ ratingKey: '2', title: 'Great B', audienceRating: 8.5 }),
+    ]);
+  });
+});
+
+describe('plex_similar', () => {
+  it('queries /library/metadata/{ratingKey}/similar and returns ratingKeys', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/metadata/9000/similar', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              { ratingKey: '101', title: 'Arrival', type: 'movie', year: 2016, audienceRating: 8.1 },
+              { ratingKey: '102', title: 'Annihilation', type: 'movie', year: 2018, audienceRating: 7.5 },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_similar, { ratingKey: '9000', count: 5 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(calls.some((c) => c.url.includes('/library/metadata/9000/similar'))).toBe(true);
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get('X-Plex-Container-Size')).toBe('5');
+
+    expect(parsed.summary).toMatch(/2 similar library items/);
+    expect(parsed.items).toEqual([
+      expect.objectContaining({ ratingKey: '101', title: 'Arrival', audienceRating: 8.1 }),
+      expect.objectContaining({ ratingKey: '102', title: 'Annihilation', audienceRating: 7.5 }),
+    ]);
   });
 });

@@ -74,6 +74,7 @@ interface PlexMetadata {
   audienceRating?: number;
   rating?: number;
   grandparentTitle?: string;
+  grandparentRatingKey?: string;
   parentIndex?: number;
   index?: number;
   leafCount?: number;
@@ -143,6 +144,10 @@ function formatItem(m: PlexMetadata, dateField: 'addedAt' | 'viewedAt') {
     type: m.type,
     year: m.year ?? null,
     date: ts ? new Date(ts * 1000).toISOString().slice(0, 10) : null,
+    ratingKey: m.ratingKey ?? null,
+    ...(m.type === 'episode' && m.grandparentRatingKey
+      ? { showRatingKey: m.grandparentRatingKey }
+      : {}),
   };
 }
 
@@ -186,6 +191,38 @@ async function listSections(): Promise<PlexSection[]> {
   return data.MediaContainer.Directory ?? [];
 }
 
+function pickSections(sections: PlexSection[], filter: 'movies' | 'shows' | 'all'): PlexSection[] {
+  return sections.filter((s) => {
+    if (filter === 'all') return s.type === 'movie' || s.type === 'show';
+    if (filter === 'movies') return s.type === 'movie';
+    return s.type === 'show';
+  });
+}
+
+async function fetchUnwatchedMetadata(opts: {
+  sectionFilter: 'movies' | 'shows' | 'all';
+  sortParam: string;
+  pageSize: number;
+}): Promise<{ wantedCount: number; collected: PlexMetadata[] }> {
+  const sections = await listSections();
+  const wanted = pickSections(sections, opts.sectionFilter);
+  if (wanted.length === 0) return { wantedCount: 0, collected: [] };
+
+  const responses = await Promise.all(
+    wanted.map((sec) =>
+      plexApi<PlexResponse>(`/library/sections/${sec.key}/unwatched`, {
+        sort: opts.sortParam,
+        'X-Plex-Container-Start': '0',
+        'X-Plex-Container-Size': String(opts.pageSize),
+      })
+    )
+  );
+  return {
+    wantedCount: wanted.length,
+    collected: responses.flatMap((data) => data.MediaContainer.Metadata ?? []),
+  };
+}
+
 export const plex_unwatched = tool(
   'plex_unwatched',
   'List unwatched titles in the Plex library. Use this for "what should I watch tonight" — combine with mdblist_ratings to surface highly-rated picks. Defaults to movies; pass section="shows" for unwatched/partially-watched series.',
@@ -220,14 +257,13 @@ export const plex_unwatched = tool(
             ? 'addedAt:asc'
             : 'addedAt:desc';
 
-    const sections = await listSections();
-    const wanted = sections.filter((s) => {
-      if (sectionFilter === 'all') return s.type === 'movie' || s.type === 'show';
-      if (sectionFilter === 'movies') return s.type === 'movie';
-      return s.type === 'show';
+    const { wantedCount, collected } = await fetchUnwatchedMetadata({
+      sectionFilter,
+      sortParam,
+      pageSize: limit,
     });
 
-    if (wanted.length === 0) {
+    if (wantedCount === 0) {
       return {
         content: [
           {
@@ -238,19 +274,8 @@ export const plex_unwatched = tool(
       };
     }
 
-    const responses = await Promise.all(
-      wanted.map((sec) =>
-        plexApi<PlexResponse>(`/library/sections/${sec.key}/unwatched`, {
-          sort: sortParam,
-          'X-Plex-Container-Start': '0',
-          'X-Plex-Container-Size': String(limit),
-        })
-      )
-    );
-    const collected: PlexMetadata[] = responses.flatMap((data) => data.MediaContainer.Metadata ?? []);
-
     // Re-sort the merged list when we queried multiple sections (Plex sorts within each).
-    if (wanted.length > 1 && sortMode !== 'random') {
+    if (wantedCount > 1 && sortMode !== 'random') {
       collected.sort((a, b) => {
         if (sortMode === 'highest_rated') {
           return (b.audienceRating ?? 0) - (a.audienceRating ?? 0);
@@ -277,6 +302,120 @@ export const plex_unwatched = tool(
 
     return envelope(
       `${plural(items.length, 'unwatched item')} (${sectionFilter}, sort: ${sortMode})`,
+      items
+    );
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+export const plex_collecting_dust = tool(
+  'plex_collecting_dust',
+  'Surface "hidden gem" library items that have been sitting around longest without being watched. Returns oldest-added unwatched titles, optionally filtered by minimum Plex audience rating so you skip the forgettable adds. Pair with mdblist_ratings for an external rating check.',
+  {
+    section: sectionSchema
+      .optional()
+      .describe('Which library section type to query (default "movies"). Accepts movie/movies, show/shows, series, tv, or all.'),
+    count: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe('Number of items to return (default 15)'),
+    minRating: z
+      .number()
+      .min(0)
+      .max(10)
+      .optional()
+      .describe('Only include items whose Plex audienceRating is at least this value (0-10). Items with no audienceRating are dropped when this is set.'),
+  },
+  safe(async ({ section, count, minRating }) => {
+    const sectionFilter = (normalizeSection(section) as 'movies' | 'shows' | 'all' | undefined) ?? 'movies';
+    const limit = count ?? 15;
+    // Overfetch when filtering by rating so we still hit `limit` after dropping
+    // unrated/low-rated items.
+    const pageSize = minRating !== undefined ? Math.min(50, limit * 4) : limit;
+
+    const { wantedCount, collected } = await fetchUnwatchedMetadata({
+      sectionFilter,
+      sortParam: 'addedAt:asc',
+      pageSize,
+    });
+
+    if (wantedCount === 0) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ items: [], note: `No ${sectionFilter} sections found.` }, null, 2),
+          },
+        ],
+      };
+    }
+
+    if (wantedCount > 1) {
+      collected.sort((a, b) => (a.addedAt ?? 0) - (b.addedAt ?? 0));
+    }
+
+    const filtered =
+      minRating === undefined
+        ? collected
+        : collected.filter(
+            (m) => typeof m.audienceRating === 'number' && m.audienceRating >= minRating
+          );
+
+    const items = filtered.slice(0, limit).map((m) => ({
+      ratingKey: m.ratingKey ?? null,
+      title: m.title,
+      type: m.type,
+      year: m.year ?? null,
+      addedAt: m.addedAt ? new Date(m.addedAt * 1000).toISOString().slice(0, 10) : null,
+      ...(typeof m.audienceRating === 'number' ? { audienceRating: m.audienceRating } : {}),
+      ...(m.type === 'show' && typeof m.leafCount === 'number'
+        ? { episodes: m.leafCount, watched: m.viewedLeafCount ?? 0 }
+        : {}),
+    }));
+
+    const ratingNote = minRating !== undefined ? `, audienceRating ≥ ${minRating}` : '';
+    return envelope(
+      `${plural(items.length, 'dusty unwatched item')} (${sectionFilter}${ratingNote})`,
+      items
+    );
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+export const plex_similar = tool(
+  'plex_similar',
+  'Find Plex library items similar to a given item (uses Plex\'s built-in similarity based on shared genre, director, cast, etc). Pass the ratingKey from plex_search; for a show, use the show\'s ratingKey (not an episode\'s) — plex_watch_history surfaces `showRatingKey` for episodes you watched.',
+  {
+    ratingKey: z.string().describe("The Plex item's ratingKey to find similars for"),
+    count: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe('Max similar items to return (default 10)'),
+  },
+  safe(async ({ ratingKey, count }) => {
+    const limit = count ?? 10;
+    const data = await plexApi<PlexResponse>(`/library/metadata/${ratingKey}/similar`, {
+      'X-Plex-Container-Start': '0',
+      'X-Plex-Container-Size': String(limit),
+    });
+
+    const items = (data.MediaContainer.Metadata ?? []).slice(0, limit).map((m) => ({
+      ratingKey: m.ratingKey ?? null,
+      title: m.title,
+      type: m.type,
+      year: m.year ?? null,
+      ...(typeof m.audienceRating === 'number' ? { audienceRating: m.audienceRating } : {}),
+      addedAt: m.addedAt ? new Date(m.addedAt * 1000).toISOString().slice(0, 10) : null,
+    }));
+
+    return envelope(
+      `${plural(items.length, 'similar library item')} (ratingKey ${ratingKey})`,
       items
     );
   }),
@@ -666,9 +805,67 @@ export const plex_apply_match = tool(
   { annotations: { readOnlyHint: false } }
 );
 
+interface PlexAccount {
+  id?: number;
+  key?: string;
+  name?: string;
+  title?: string;
+  thumb?: string;
+}
+
+interface PlexAccountsResponse {
+  MediaContainer: { Account?: PlexAccount[] };
+}
+
+async function listAccounts(): Promise<PlexAccount[]> {
+  const data = await plexApi<PlexAccountsResponse>('/accounts');
+  return data.MediaContainer.Account ?? [];
+}
+
+function accountDisplayName(a: PlexAccount): string {
+  return a.name ?? a.title ?? '';
+}
+
+async function resolveAccountId(user: string): Promise<{ id: number; name: string }> {
+  const trimmed = user.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const accounts = await listAccounts();
+    const match = accounts.find((a) => String(a.id) === trimmed);
+    return { id: Number(trimmed), name: match ? accountDisplayName(match) : trimmed };
+  }
+
+  const accounts = await listAccounts();
+  const lower = trimmed.toLowerCase();
+  const exact = accounts.find((a) => accountDisplayName(a).toLowerCase() === lower);
+  const partial = exact ?? accounts.find((a) => accountDisplayName(a).toLowerCase().includes(lower));
+
+  if (!partial || typeof partial.id !== 'number') {
+    const known = accounts.map(accountDisplayName).filter(Boolean).join(', ');
+    throw new Error(
+      `No Plex account matches "${user}". Known accounts: ${known || '(none returned by /accounts)'}.`
+    );
+  }
+  return { id: partial.id, name: accountDisplayName(partial) || trimmed };
+}
+
+export const plex_list_users = tool(
+  'plex_list_users',
+  'List Plex accounts that have access to this server (id, name). Use this to resolve a username to an accountID before calling plex_watch_history with a specific user.',
+  {},
+  safe(async () => {
+    const accounts = await listAccounts();
+    const items = accounts.map((a) => ({
+      id: a.id ?? null,
+      name: accountDisplayName(a) || null,
+    }));
+    return envelope(`${plural(items.length, 'Plex account')}`, items);
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
 export const plex_watch_history = tool(
   'plex_watch_history',
-  'Show recently watched movies and TV episodes from Plex play history, newest first.',
+  'Show recently watched movies and TV episodes from Plex play history, newest first. Pass `user` (account name or numeric id) to scope to one Plex user; omit it for global server history. Use plex_list_users to discover account names/ids.',
   {
     count: z
       .number()
@@ -677,17 +874,35 @@ export const plex_watch_history = tool(
       .max(50)
       .optional()
       .describe('Number of items to return (default 10)'),
+    user: z
+      .string()
+      .optional()
+      .describe(
+        'Optional Plex account name (e.g. "Feelsgooodjpeg") or numeric account id to scope history to one user. Resolved via /accounts.'
+      ),
   },
-  safe(async ({ count }) => {
-    const data = await plexApi<PlexResponse>('/status/sessions/history/all', {
+  safe(async ({ count, user }) => {
+    const params: Record<string, string> = {
       sort: 'viewedAt:desc',
       'X-Plex-Container-Start': '0',
       'X-Plex-Container-Size': String(count ?? 10),
-    });
+    };
+
+    let scopedUser: { id: number; name: string } | null = null;
+    if (user !== undefined) {
+      scopedUser = await resolveAccountId(user);
+      params.accountID = String(scopedUser.id);
+    }
+
+    const data = await plexApi<PlexResponse>('/status/sessions/history/all', params);
 
     const items = (data.MediaContainer.Metadata ?? []).map((m) => formatItem(m, 'viewedAt'));
 
-    return envelope(`${plural(items.length, 'recent watch event')}`, items);
+    const summary = scopedUser
+      ? `${plural(items.length, 'recent watch event')} for ${scopedUser.name} (accountID ${scopedUser.id})`
+      : `${plural(items.length, 'recent watch event')}`;
+
+    return envelope(summary, items);
   }),
   { annotations: { readOnlyHint: true } }
 );

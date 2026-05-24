@@ -5,6 +5,7 @@ import {
   overseerr_create_request,
   overseerr_delete_request,
   overseerr_discover,
+  overseerr_discover_hidden_gems,
   overseerr_get_request,
   overseerr_list_requests,
   overseerr_person_credits,
@@ -12,7 +13,7 @@ import {
   overseerr_report_issue,
   overseerr_search,
 } from './overseerr.js';
-import { installFetchMock, invoke, route } from './_testing.js';
+import { installFetchMock, invoke, route, routeSequence } from './_testing.js';
 import { resetIdempotencyForTests } from './idempotency.js';
 import { resetDbForTests } from '../db.js';
 
@@ -610,5 +611,131 @@ describe('overseerr_discover', () => {
     const url = new URL(calls[0].url);
     expect(url.pathname).toBe('/api/v1/discover/tv');
     expect(url.searchParams.get('genre')).toBe('10765');
+  });
+});
+
+describe('overseerr_discover_hidden_gems', () => {
+  it('sorts by vote_average.desc and filters by rating + vote-count window', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/api/v1/discover/movies', {
+        json: {
+          results: [
+            // Below minVoteAverage
+            { id: 1, mediaType: 'movie', title: 'Meh', voteAverage: 6.5, voteCount: 800 },
+            // Too few votes
+            { id: 2, mediaType: 'movie', title: 'Obscure', voteAverage: 9.0, voteCount: 50 },
+            // Too widely known
+            { id: 3, mediaType: 'movie', title: 'Mega Hit', voteAverage: 8.2, voteCount: 20000 },
+            // Passes everything; missing from library
+            { id: 4, mediaType: 'movie', title: 'Gem', releaseDate: '2014-01-01', voteAverage: 8.1, voteCount: 1500 },
+            // Passes filters but already in library — should be excluded by default
+            {
+              id: 5,
+              mediaType: 'movie',
+              title: 'Already Owned',
+              voteAverage: 7.9,
+              voteCount: 1200,
+              mediaInfo: { status: 5 },
+            },
+          ],
+          totalPages: 1,
+        },
+      }),
+    ]);
+
+    const result = await invoke(overseerr_discover_hidden_gems, { mediaType: 'movie' });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    const url = new URL(calls[0].url);
+    expect(url.pathname).toBe('/api/v1/discover/movies');
+    expect(url.searchParams.get('sortBy')).toBe('vote_average.desc');
+
+    expect(parsed.summary).toMatch(/1 movie hidden gem \(rating ≥ 7.5, votes 200-5000\)/);
+    expect(parsed.items).toEqual([
+      {
+        tmdbId: 4,
+        mediaType: 'movie',
+        title: 'Gem',
+        year: '2014',
+        voteAverage: 8.1,
+        voteCount: 1500,
+        libraryStatus: 'missing',
+      },
+    ]);
+  });
+
+  it('pages through multiple results pages until the limit is hit', async () => {
+    const { calls } = installFetchMock([
+      routeSequence('GET', '/api/v1/discover/movies', [
+        // Page 1: only one item passes the vote-count window.
+        {
+          json: {
+            results: [
+              { id: 1, mediaType: 'movie', title: 'Mega', voteAverage: 8.5, voteCount: 50000 },
+              { id: 2, mediaType: 'movie', title: 'Pass A', voteAverage: 8.0, voteCount: 1000 },
+            ],
+            totalPages: 3,
+          },
+        },
+        // Page 2: two more that pass, so the tool stops with 2 in hand.
+        {
+          json: {
+            results: [
+              { id: 3, mediaType: 'movie', title: 'Pass B', voteAverage: 7.9, voteCount: 900 },
+              { id: 4, mediaType: 'movie', title: 'Pass C', voteAverage: 7.8, voteCount: 800 },
+            ],
+            totalPages: 3,
+          },
+        },
+      ]),
+    ]);
+
+    const result = await invoke(overseerr_discover_hidden_gems, { take: 2 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    const discoverCalls = calls.filter((c) => c.url.includes('/api/v1/discover/movies'));
+    expect(discoverCalls).toHaveLength(2);
+    expect(new URL(discoverCalls[0].url).searchParams.get('page')).toBe('1');
+    expect(new URL(discoverCalls[1].url).searchParams.get('page')).toBe('2');
+    expect(parsed.items.map((i: { tmdbId: number }) => i.tmdbId)).toEqual([2, 3]);
+  });
+
+  it('includes library items when includeInLibrary is true', async () => {
+    installFetchMock([
+      route('GET', '/api/v1/discover/movies', {
+        json: {
+          results: [
+            {
+              id: 9,
+              mediaType: 'movie',
+              title: 'Owned Gem',
+              voteAverage: 8.0,
+              voteCount: 1000,
+              mediaInfo: { status: 5 },
+            },
+          ],
+          totalPages: 1,
+        },
+      }),
+    ]);
+
+    const result = await invoke(overseerr_discover_hidden_gems, { includeInLibrary: true });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(parsed.items).toEqual([
+      expect.objectContaining({ tmdbId: 9, libraryStatus: 'available' }),
+    ]);
+  });
+
+  it('errors when minVoteCount > maxVoteCount', async () => {
+    installFetchMock([]);
+
+    const result = await invoke(overseerr_discover_hidden_gems, {
+      minVoteCount: 5000,
+      maxVoteCount: 100,
+    });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse((result.content[0] as { text: string }).text) as { error: string };
+    expect(parsed.error).toMatch(/minVoteCount \(5000\) must be ≤ maxVoteCount \(100\)/);
   });
 });

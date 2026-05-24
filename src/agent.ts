@@ -71,14 +71,19 @@ Behaviour rules:
 - Do not put blank lines between every bullet item. For long lists, group by heading and show the most important items first with a count of additional items.
 - If the user declines a confirmation, accept it — don't pester.`;
 
+export type PromptInput =
+  | { type: 'user'; message: { role: 'user'; content: string } }
+  | { type: 'reset' };
+
 export interface RunOptions {
-  prompt: AsyncIterable<unknown>;
+  prompt: AsyncIterable<PromptInput>;
   canUseTool: CanUseTool;
   onSubagentEvent?: (event: SubagentEvent) => void | Promise<void>;
 }
 
 export type AgentEvent =
   | { type: 'user' }
+  | { type: 'reset' }
   | { type: 'assistant_text_delta'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   | { type: 'usage'; usage: TokenUsageLike }
@@ -91,13 +96,6 @@ interface TokenUsageLike {
   cacheReadTokens?: number;
 }
 
-function extractUserText(message: unknown): string | null {
-  if (typeof message !== 'object' || message === null) return null;
-  const m = message as { message?: { content?: unknown } };
-  const content = m.message?.content;
-  return typeof content === 'string' ? content : null;
-}
-
 export async function* run({ prompt, canUseTool, onSubagentEvent }: RunOptions): AsyncIterable<AgentEvent> {
   const messages: unknown[] = [];
   const toolDescriptors = [
@@ -107,7 +105,13 @@ export async function* run({ prompt, canUseTool, onSubagentEvent }: RunOptions):
   const tools = toAiTools(toolDescriptors, canUseTool);
 
   for await (const input of prompt) {
-    const userText = extractUserText(input);
+    if (input.type === 'reset') {
+      messages.length = 0;
+      yield { type: 'reset' };
+      continue;
+    }
+
+    const userText = input.message.content;
     if (!userText) continue;
 
     yield { type: 'user' };
