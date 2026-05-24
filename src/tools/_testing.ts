@@ -76,3 +76,35 @@ export function route(
     ...response,
   };
 }
+
+export function routeSequence(
+  method: string,
+  pathFragment: string,
+  responses: Omit<MockRoute, 'match'>[]
+): MockRoute {
+  let index = 0;
+  let current = responses[0];
+  return {
+    match: (url, init) => {
+      const m = (init?.method ?? 'GET').toUpperCase();
+      const matched = m === method.toUpperCase() && url.includes(pathFragment);
+      if (matched) {
+        current = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+      }
+      return matched;
+    },
+    get status() {
+      return current?.status;
+    },
+    get json() {
+      return current?.json;
+    },
+    get text() {
+      return current?.text;
+    },
+    get headers() {
+      return current?.headers;
+    },
+  };
+}

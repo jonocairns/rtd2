@@ -73,6 +73,7 @@ Then talk to the agent about your library. Examples:
 > sync my mdblist rt-m into overseerr
 > show me requests from last month that haven't downloaded yet
 > what's in my library by Villeneuve?
+> find low-quality movie files, especially 720p or non-HEVC encodes
 ```
 
 The agent will ask for confirmation before making mutating changes. Pass `--yolo` to skip confirmation.

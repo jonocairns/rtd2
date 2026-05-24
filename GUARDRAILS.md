@@ -115,11 +115,13 @@ Composio and Zylos both call this out: explicit contracts beat raw dumps. The `n
 - **Unit:** vitest. Mocked-fetch helper at [src/tools/_testing.ts](src/tools/_testing.ts). Tests cover the `safe()` wrapper, local SQLite store, mutating tool idempotency, request moderation, title enrichment, alias normalization, call order, keepFile branches, error paths, and envelope shapes. `pnpm test`.
 - **Eval:** [evalite](https://www.npmjs.com/package/evalite) — TS-native eval runner with built-in run history (SQLite at `node_modules/.evalite/cache.sqlite`) and a local web UI for diffing across runs. Per-run cost is shown in a column, with rates pulled from [LiteLLM's pricing catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) at startup so changing the model in [agent.ts](src/agent.ts) updates costs automatically. [evals/_runner.ts](evals/_runner.ts) installs a host-aware fetch interceptor — backend hosts (overseerr.test, plex.test, radarr.test, sonarr.test, mdblist.com) are mocked; model API hosts pass through so the configured model is exercised. Reusable scorers in [evals/_scorers.ts](evals/_scorers.ts) (`containsTools`, `toolOrder`, `toolCallCount`, `finalTextIncludes`, `toolInputMatches`). Scenarios in [evals/](evals/) now cover search-and-request, read-only media investigation, request management, request title enrichment, alias resilience, delete-vs-replace selection, Plex match correction, Sonarr replacement scope, filmography gaps, issue-and-regrab, streaming availability, and tonight-watch recommendations. Run `pnpm eval` once (requires a real model provider API key; costs API credits per run), `pnpm eval:ui` to see the run-history UI.
 
-### 8. Self-check after destructive ops (optional)
+### 8. Self-check after destructive ops ✅
 
 **Problem.** Agent reports success based on the command-queue response, not the actual outcome.
 
 **Fix.** After `radarr_replace_movie`, the agent re-fetches movie status and confirms `hasFile: false` + a queued grab is visible. This is the "agents that check their own output" pattern from [the Claude Agent SDK production guide](https://www.digitalapplied.com/blog/claude-agent-sdk-production-patterns-guide). Low-effort and catches silent failures.
+
+**Implemented.** `radarr_replace_movie` and `sonarr_replace` now append a `selfCheck` object to the tool result. After deleting files and queueing a replacement search, each tool re-fetches the affected movie/episodes and the command queue, then reports whether deleted files are no longer attached and whether the queued search command is visible. Verification failures are returned as `selfCheck.ok: false` with an error or failed condition instead of hiding behind the original command response.
 
 ## Out of scope for this codebase
 
@@ -131,7 +133,7 @@ Composio and Zylos both call this out: explicit contracts beat raw dumps. The `n
 
 1, 2, 3 give the biggest reliability and safety jump for the least code. 4 and 5 are quality-of-life. 6 is housekeeping. 7 is the moat — it pays off the first time you tweak the system prompt and accidentally break a flow.
 
-**Status:** 1, 3, 5, 6, 7 done. 2 deferred until we see real loop-retry behaviour in the wild. 4, 8 outstanding.
+**Status:** 1, 2, 3, 5, 6, 7, 8 done. 4 outstanding.
 
 ## Sources
 

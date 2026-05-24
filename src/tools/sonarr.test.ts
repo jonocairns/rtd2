@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { sonarr_replace } from './sonarr.js';
-import { installFetchMock, invoke, route } from './_testing.js';
+import { installFetchMock, invoke, route, routeSequence } from './_testing.js';
 import { resetIdempotencyForTests } from './idempotency.js';
 
 function tvDetail() {
@@ -19,6 +19,15 @@ function sonarrEpisodes() {
   ];
 }
 
+function sonarrEpisodesAfterDelete(fileIds: number[]) {
+  const deleted = new Set(fileIds);
+  return sonarrEpisodes().map((episode) =>
+    deleted.has(episode.episodeFileId)
+      ? { ...episode, episodeFileId: 0, hasFile: false }
+      : episode
+  );
+}
+
 beforeEach(() => {
   resetIdempotencyForTests();
 });
@@ -28,12 +37,16 @@ describe('sonarr_replace (single episode)', () => {
     const { calls } = installFetchMock([
       route('GET', '/api/v1/tv/603', { json: tvDetail() }),
       route('GET', '/series?tvdbId=1234', { json: sonarrSeries() }),
-      route('GET', '/episode?seriesId=11', { json: sonarrEpisodes() }),
+      routeSequence('GET', '/episode?seriesId=11', [
+        { json: sonarrEpisodes() },
+        { json: sonarrEpisodesAfterDelete([502]) },
+      ]),
       route('DELETE', '/episodefile/502', { json: {} }),
       route('POST', '/command', { json: { id: 50, status: 'queued' } }),
+      route('GET', '/command', { json: [{ id: 50, name: 'EpisodeSearch', status: 'queued' }] }),
     ]);
 
-    await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1, episodeNumber: 2 });
+    const result = await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1, episodeNumber: 2 });
 
     const sequence = calls.map((c) => `${c.method} ${new URL(c.url).pathname}`);
     const deleteIdx = sequence.findIndex((s) => s.startsWith('DELETE'));
@@ -45,15 +58,24 @@ describe('sonarr_replace (single episode)', () => {
       name: 'EpisodeSearch',
       episodeIds: [102],
     });
+    expect(JSON.parse((result.content[0] as { text: string }).text).selfCheck).toMatchObject({
+      ok: true,
+      fileStateOk: true,
+      searchCommandVisible: true,
+    });
   });
 
   it('only deletes the targeted episode\'s file, not others', async () => {
     const { calls } = installFetchMock([
       route('GET', '/api/v1/tv/603', { json: tvDetail() }),
       route('GET', '/series?tvdbId=1234', { json: sonarrSeries() }),
-      route('GET', '/episode?seriesId=11', { json: sonarrEpisodes() }),
+      routeSequence('GET', '/episode?seriesId=11', [
+        { json: sonarrEpisodes() },
+        { json: sonarrEpisodesAfterDelete([502]) },
+      ]),
       route('DELETE', '/episodefile/502', { json: {} }),
       route('POST', '/command', { json: { id: 50, status: 'queued' } }),
+      route('GET', '/command', { json: [{ id: 50, name: 'EpisodeSearch', status: 'queued' }] }),
     ]);
 
     await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1, episodeNumber: 2 });
@@ -67,9 +89,13 @@ describe('sonarr_replace (single episode)', () => {
     const { calls } = installFetchMock([
       route('GET', '/api/v1/tv/603', { json: tvDetail() }),
       route('GET', '/series?tvdbId=1234', { json: sonarrSeries() }),
-      route('GET', '/episode?seriesId=11', { json: sonarrEpisodes() }),
+      routeSequence('GET', '/episode?seriesId=11', [
+        { json: sonarrEpisodes() },
+        { json: sonarrEpisodesAfterDelete([502]) },
+      ]),
       route('DELETE', '/episodefile/502', { json: {} }),
       route('POST', '/command', { json: { id: 50, status: 'queued' } }),
+      route('GET', '/command', { json: [{ id: 50, name: 'EpisodeSearch', status: 'queued' }] }),
     ]);
 
     await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1, episodeNumber: 2 });
@@ -91,10 +117,14 @@ describe('sonarr_replace (full season)', () => {
     const { calls } = installFetchMock([
       route('GET', '/api/v1/tv/603', { json: tvDetail() }),
       route('GET', '/series?tvdbId=1234', { json: sonarrSeries() }),
-      route('GET', '/episode?seriesId=11', { json: sonarrEpisodes() }),
+      routeSequence('GET', '/episode?seriesId=11', [
+        { json: sonarrEpisodes() },
+        { json: sonarrEpisodesAfterDelete([501, 502]) },
+      ]),
       route('DELETE', '/episodefile/501', { json: {} }),
       route('DELETE', '/episodefile/502', { json: {} }),
       route('POST', '/command', { json: { id: 50, status: 'queued' } }),
+      route('GET', '/command', { json: [{ id: 50, name: 'SeasonSearch', status: 'queued' }] }),
     ]);
 
     await invoke(sonarr_replace, { tmdbId: 603, seasonNumber: 1 });
@@ -118,8 +148,12 @@ describe('sonarr_replace (keepFile)', () => {
     const { calls } = installFetchMock([
       route('GET', '/api/v1/tv/603', { json: tvDetail() }),
       route('GET', '/series?tvdbId=1234', { json: sonarrSeries() }),
-      route('GET', '/episode?seriesId=11', { json: sonarrEpisodes() }),
+      routeSequence('GET', '/episode?seriesId=11', [
+        { json: sonarrEpisodes() },
+        { json: sonarrEpisodes() },
+      ]),
       route('POST', '/command', { json: { id: 50, status: 'queued' } }),
+      route('GET', '/command', { json: [{ id: 50, name: 'EpisodeSearch', status: 'queued' }] }),
     ]);
 
     await invoke(sonarr_replace, {

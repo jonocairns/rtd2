@@ -96,6 +96,8 @@ All tools are TypeScript functions exposed to the model as AI SDK tool definitio
 - `plex_watch_history(count?)` — recent play history
 - `plex_unwatched(section?, sort?, count?)` — unwatched titles; sort `recently_added | highest_rated | random | oldest_added`
 - `plex_search(query, count?)` — find a library item; returns ratingKey
+- `plex_quality_profile(ratingKey)` — inspect one item's container, video codec, resolution, bitrate, file size, path, and audio tracks
+- `plex_quality_audit(section?, count?, minHeight?, minBitrateKbps?, maxFileSizeGiB?, preferredVideoCodecs?, preferredContainers?)` — read-only audit for likely low-quality files across movies or episode files
 - `plex_get_matches(ratingKey)` — alternative metadata candidates Plex has identified
 - `plex_apply_match(ratingKey, guid, name?)` — switch a library item to a chosen match; **mutating**
 
@@ -103,7 +105,8 @@ All tools are TypeScript functions exposed to the model as AI SDK tool definitio
 - `mdblist_ratings(items)` — aggregated ratings (RT critics/audience, IMDb, Metacritic, Letterboxd, etc.) for one or many `{tmdbId, mediaType}` titles in a single batched call
 
 **Radarr** (re-grab flow only):
-- `radarr_replace_movie(tmdbId, keepFile?)` — delete the existing file (unless `keepFile`) and trigger a fresh `MoviesSearch`; **mutating**
+- `radarr_replacement_candidates(tmdbId, count?)` — read-only preflight showing current file and top scored replacement releases before deletion
+- `radarr_replace_movie(tmdbId, keepFile?, selectedReleaseGuid?, selectedReleaseIndexerId?, allowQualityDowngrade?)` — delete the existing file (unless `keepFile`) and either trigger a fresh `MoviesSearch` or grab a selected release; **mutating**
 
 **Sonarr** (re-grab flow only):
 - `sonarr_replace(tmdbId, seasonNumber, episodeNumber?, keepFile?)` — delete the existing file(s) and trigger `EpisodeSearch` or `SeasonSearch`; **mutating**
@@ -113,7 +116,7 @@ All tools are TypeScript functions exposed to the model as AI SDK tool definitio
 
 ## 6. Skills (v1)
 
-Four skills, each focused. The agent picks which to load when based on the description frontmatter.
+Five skills, each focused. The agent picks which to load when based on the description frontmatter.
 
 | Skill | When | What it teaches the agent |
 |---|---|---|
@@ -121,6 +124,7 @@ Four skills, each focused. The agent picks which to load when based on the descr
 | `recommend-watch` | "What should I watch tonight" / mood queries | How to match the profile against existing-library candidates first, then fall back to discovery for things to request |
 | `find-and-add` | "Find me X" → request flow | How to compose `overseerr_search` results, deduplicate, propose a confirmation plan |
 | `library-audit` | "What's stale" / library stats queries | How to summarize library state: oldest unwatched, biggest unwatched genres, top-watched directors, completion gaps |
+| `file-quality-audit` | "What low-quality files do I have" / codec, resolution, bitrate, size, or audio-track queries | How to inspect Plex stream metadata and propose safe Radarr/Sonarr replacement follow-ups |
 
 Each `SKILL.md` has YAML frontmatter (`name`, `description`) plus the body of instructions. Bodies load on-demand — progressive disclosure keeps token usage reasonable.
 

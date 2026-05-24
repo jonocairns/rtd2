@@ -80,6 +80,7 @@ interface PlexMetadata {
   viewedLeafCount?: number;
   librarySectionID?: number;
   guid?: string;
+  Media?: PlexMedia[];
 }
 
 interface PlexResponse {
@@ -87,6 +88,49 @@ interface PlexResponse {
     size?: number;
     Metadata?: PlexMetadata[];
   };
+}
+
+interface PlexMedia {
+  id?: number;
+  duration?: number;
+  bitrate?: number;
+  width?: number;
+  height?: number;
+  aspectRatio?: number;
+  audioChannels?: number;
+  audioCodec?: string;
+  videoCodec?: string;
+  videoResolution?: string;
+  container?: string;
+  Part?: PlexPart[];
+}
+
+interface PlexPart {
+  id?: number;
+  file?: string;
+  size?: number;
+  container?: string;
+  duration?: number;
+  Stream?: PlexStream[];
+}
+
+interface PlexStream {
+  id?: number;
+  streamType?: number;
+  streamTypeID?: number;
+  codec?: string;
+  profile?: string;
+  bitrate?: number;
+  width?: number;
+  height?: number;
+  channels?: number;
+  audioChannelLayout?: string;
+  language?: string;
+  languageCode?: string;
+  displayTitle?: string;
+  title?: string;
+  selected?: boolean;
+  default?: boolean;
 }
 
 function formatItem(m: PlexMetadata, dateField: 'addedAt' | 'viewedAt') {
@@ -285,6 +329,255 @@ export const plex_search = tool(
       }));
 
     return envelope(`${plural(items.length, 'Plex item')} matching "${query}"`, items);
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+function bytesToGiB(size?: number): number | null {
+  return typeof size === 'number' ? Number((size / 1024 ** 3).toFixed(2)) : null;
+}
+
+function normalizeCodec(value?: string): string | null {
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  if (['h264', 'avc', 'avc1'].includes(normalized)) return 'h264';
+  if (['h265', 'hevc', 'x265'].includes(normalized)) return 'hevc';
+  return normalized;
+}
+
+function normalizeContainer(value?: string): string | null {
+  return value ? value.toLowerCase() : null;
+}
+
+function qualityTitle(m: PlexMetadata): string {
+  if (m.type === 'episode') {
+    return `${m.grandparentTitle ?? m.title} S${String(m.parentIndex ?? 0).padStart(2, '0')}E${String(m.index ?? 0).padStart(2, '0')} - ${m.title}`;
+  }
+  return `${m.title}${m.year ? ` (${m.year})` : ''}`;
+}
+
+function streamsFor(media: PlexMedia | undefined, streamType: number): PlexStream[] {
+  return (media?.Part ?? []).flatMap((part) =>
+    (part.Stream ?? []).filter((stream) => (stream.streamType ?? stream.streamTypeID) === streamType)
+  );
+}
+
+function formatAudioTrack(stream: PlexStream) {
+  return {
+    codec: normalizeCodec(stream.codec),
+    profile: stream.profile ?? null,
+    channels: stream.channels ?? null,
+    layout: stream.audioChannelLayout ?? null,
+    language: stream.languageCode ?? stream.language ?? null,
+    title: stream.title ?? stream.displayTitle ?? null,
+    bitrateKbps: stream.bitrate ?? null,
+    selected: stream.selected ?? null,
+    default: stream.default ?? null,
+  };
+}
+
+function formatMediaProfile(m: PlexMetadata) {
+  const media = m.Media?.[0];
+  const part = media?.Part?.[0];
+  const videoStream = streamsFor(media, 1)[0];
+  const audioTracks = streamsFor(media, 2).map(formatAudioTrack);
+  const container = normalizeContainer(part?.container ?? media?.container);
+  const videoCodec = normalizeCodec(videoStream?.codec ?? media?.videoCodec);
+  const width = videoStream?.width ?? media?.width ?? null;
+  const height = videoStream?.height ?? media?.height ?? null;
+
+  return {
+    ratingKey: m.ratingKey ?? null,
+    title: qualityTitle(m),
+    type: m.type,
+    container,
+    videoCodec,
+    resolution: height ? `${height}p` : (media?.videoResolution ?? null),
+    width,
+    height,
+    bitrateKbps: media?.bitrate ?? videoStream?.bitrate ?? null,
+    fileSizeGiB: bytesToGiB(part?.size),
+    path: part?.file ?? null,
+    audioTracks,
+  };
+}
+
+function lowQualityFlags(
+  profile: ReturnType<typeof formatMediaProfile>,
+  opts: {
+    minHeight: number;
+    minBitrateKbps?: number;
+    maxFileSizeGiB?: number;
+    preferredVideoCodecs?: string[];
+    preferredContainers?: string[];
+  }
+): string[] {
+  const flags: string[] = [];
+  if (typeof profile.height === 'number' && profile.height < opts.minHeight) {
+    flags.push(`resolution below ${opts.minHeight}p`);
+  }
+  if (
+    typeof opts.minBitrateKbps === 'number' &&
+    typeof profile.bitrateKbps === 'number' &&
+    profile.bitrateKbps < opts.minBitrateKbps
+  ) {
+    flags.push(`bitrate below ${opts.minBitrateKbps} kbps`);
+  }
+  if (
+    typeof opts.maxFileSizeGiB === 'number' &&
+    typeof profile.fileSizeGiB === 'number' &&
+    profile.fileSizeGiB <= opts.maxFileSizeGiB
+  ) {
+    flags.push(`file size at or below ${opts.maxFileSizeGiB} GiB`);
+  }
+  if (
+    opts.preferredVideoCodecs?.length &&
+    profile.videoCodec &&
+    !opts.preferredVideoCodecs.map(normalizeCodec).includes(profile.videoCodec)
+  ) {
+    flags.push(`video codec is ${profile.videoCodec}`);
+  }
+  if (
+    opts.preferredContainers?.length &&
+    profile.container &&
+    !opts.preferredContainers.map(normalizeContainer).includes(profile.container)
+  ) {
+    flags.push(`container is ${profile.container}`);
+  }
+  return flags;
+}
+
+export const plex_quality_profile = tool(
+  'plex_quality_profile',
+  'Inspect the media file quality for one Plex item by ratingKey: container, video codec, resolution, bitrate, file size, path, and audio track details. Use plex_search first to find the ratingKey.',
+  {
+    ratingKey: z.string().describe("The Plex item's ratingKey from plex_search"),
+  },
+  safe(async ({ ratingKey }) => {
+    const data = await plexApi<{ MediaContainer: { Metadata?: PlexMetadata[] } }>(
+      `/library/metadata/${ratingKey}`
+    );
+    const item = data.MediaContainer.Metadata?.[0];
+    if (!item) throw new Error(`No Plex item found for ratingKey ${ratingKey}.`);
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(formatMediaProfile(item), null, 2) }],
+    };
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+export const plex_quality_audit = tool(
+  'plex_quality_audit',
+  'Audit Plex media files for likely low-quality downloads. Returns titles with container, video codec, resolution, bitrate, file size, audio track details, and flags such as low resolution, low bitrate, small file, non-preferred codec, or non-preferred container.',
+  {
+    section: sectionSchema
+      .optional()
+      .describe('Which library section type to audit (default movies). Use shows to audit episode files.'),
+    count: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe('Maximum low-quality items to return after filtering and sorting (default 50).'),
+    minHeight: z
+      .number()
+      .int()
+      .min(1)
+      .max(4320)
+      .optional()
+      .describe('Flag items below this vertical resolution in pixels (default 1080).'),
+    minBitrateKbps: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe('Optional: flag items below this overall media bitrate in kbps when Plex reports bitrate.'),
+    maxFileSizeGiB: z
+      .number()
+      .positive()
+      .optional()
+      .describe('Optional: flag items at or below this file size in GiB.'),
+    preferredVideoCodecs: z
+      .array(z.string())
+      .optional()
+      .describe('Optional preferred video codecs such as ["hevc","av1"]. Items outside this set are flagged.'),
+    preferredContainers: z
+      .array(z.string())
+      .optional()
+      .describe('Optional preferred containers such as ["mkv","mp4"]. Items outside this set are flagged.'),
+  },
+  safe(async ({
+    section,
+    count,
+    minHeight,
+    minBitrateKbps,
+    maxFileSizeGiB,
+    preferredVideoCodecs,
+    preferredContainers,
+  }) => {
+    const sectionFilter = (normalizeSection(section) as 'movies' | 'shows' | 'all' | undefined) ?? 'movies';
+    const limit = count ?? 50;
+    const qualityFloor = minHeight ?? 1080;
+    const sections = await listSections();
+    const wanted = sections.filter((s) => {
+      if (sectionFilter === 'all') return s.type === 'movie' || s.type === 'show';
+      if (sectionFilter === 'movies') return s.type === 'movie';
+      return s.type === 'show';
+    });
+
+    if (wanted.length === 0) {
+      return envelope(`0 quality issues (${sectionFilter})`, [], {
+        note: `No ${sectionFilter} sections found.`,
+      });
+    }
+
+    const responses = await Promise.all(
+      wanted.map((sec) => {
+        const params: Record<string, string> = {
+          sort: 'addedAt:desc',
+          'X-Plex-Container-Start': '0',
+          'X-Plex-Container-Size': '500',
+        };
+        if (sec.type === 'show') params.type = '4';
+        return plexApi<PlexResponse>(`/library/sections/${sec.key}/all`, params);
+      })
+    );
+
+    const audited = responses
+      .flatMap((data) => data.MediaContainer.Metadata ?? [])
+      .map((metadata) => {
+        const profile = formatMediaProfile(metadata);
+        return {
+          ...profile,
+          flags: lowQualityFlags(profile, {
+            minHeight: qualityFloor,
+            minBitrateKbps,
+            maxFileSizeGiB,
+            preferredVideoCodecs,
+            preferredContainers,
+          }),
+        };
+      })
+      .filter((item) => item.flags.length > 0)
+      .sort((a, b) => {
+        const ah = a.height ?? 9999;
+        const bh = b.height ?? 9999;
+        if (ah !== bh) return ah - bh;
+        return (a.bitrateKbps ?? 999999) - (b.bitrateKbps ?? 999999);
+      })
+      .slice(0, limit);
+
+    return envelope(`${plural(audited.length, 'quality issue')} (${sectionFilter})`, audited, {
+      rules: {
+        minHeight: qualityFloor,
+        minBitrateKbps: minBitrateKbps ?? null,
+        maxFileSizeGiB: maxFileSizeGiB ?? null,
+        preferredVideoCodecs: preferredVideoCodecs ?? null,
+        preferredContainers: preferredContainers ?? null,
+      },
+    });
   }),
   { annotations: { readOnlyHint: true } }
 );

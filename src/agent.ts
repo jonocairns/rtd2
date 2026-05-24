@@ -1,6 +1,6 @@
 import { streamText, stepCountIs } from 'ai';
 import type { CanUseTool } from './confirm.js';
-import { media_investigate } from './investigator.js';
+import { createMediaInvestigateTool, type SubagentEvent } from './investigator.js';
 import { model, MODEL, providerOptions } from './model.js';
 import { baseToolDescriptors } from './tool-registry.js';
 import { toAiTools, type RuntimeTool } from './tool-runtime.js';
@@ -8,11 +8,6 @@ import { toAiTools, type RuntimeTool } from './tool-runtime.js';
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
 export { MODEL } from './model.js';
-
-const toolDescriptors = [
-  media_investigate as RuntimeTool,
-  ...baseToolDescriptors,
-];
 
 const SYSTEM_PROMPT = `You are a media-management assistant for a user running a self-hosted Plex setup with Overseerr/Seerr for requests.
 
@@ -39,9 +34,12 @@ Tools available:
 - plex_watch_history — recently watched movies/episodes from Plex play history, newest first.
 - plex_unwatched — list unwatched titles in the library (movies, shows, or both). Supports sort by recently_added | highest_rated | random | oldest_added. Use for "what should I watch tonight" — combine with mdblist_ratings on a shortlist to surface the genuinely good picks.
 - plex_search — find a Plex library item by title. Returns ratingKey needed for the match-fix flow.
+- plex_quality_profile — inspect one Plex item's actual file quality by ratingKey: container, video codec, resolution, bitrate, file size, path, and audio tracks.
+- plex_quality_audit — audit Plex movies or episode files for likely low-quality downloads using actual media metadata. Use this for questions like "what low quality files do I have", "find 720p files", "show H.264 downloads", or "which files are not HEVC/AV1".
 - plex_get_matches — list alternative metadata matches Plex has identified for a library item.
 - plex_apply_match — switch a library item to a different metadata match. **MUTATING**.
-- radarr_replace_movie — delete the existing file in Radarr and trigger a fresh search. **MUTATING**. Use when a downloaded movie release is bad (wrong cut, encoding, mislabeled).
+- radarr_replacement_candidates — read-only preflight for a Radarr movie replacement; shows top scored releases and guid/indexerId before deleting anything. Use this when quality/scoring matters.
+- radarr_replace_movie — delete the existing file in Radarr and trigger a fresh search, or grab a selected release by selectedReleaseGuid + selectedReleaseIndexerId. **MUTATING**. Use when a downloaded movie release is bad (wrong cut, encoding issue, mislabeled).
 - radarr_delete_movie — remove a movie from Radarr entirely without re-downloading. Optionally deletes the file from disk. **MUTATING**. Use when the user wants to fully remove a title.
 - sonarr_replace — delete season or specific episode file(s) in Sonarr and trigger a fresh search. **MUTATING**.
 - sonarr_delete_series — remove a series from Sonarr entirely without re-downloading. Optionally deletes all files from disk. **MUTATING**. Use when the user wants to fully remove a show.
@@ -57,16 +55,21 @@ Behaviour rules:
 - For "what should I watch tonight", lead with plex_unwatched (sort=highest_rated) and optionally enrich the top few with mdblist_ratings. Factor in recent plex_watch_history if the user gave a mood hint. Name the specific titles you're recommending — don't say "a few strong options" without listing which.
 - For TV, ask which seasons they want before calling overseerr_create_request unless they already specified.
 - When the user reports a quality issue, after overseerr_report_issue offer to re-grab via radarr_replace_movie / sonarr_replace. State what will be deleted before they confirm.
+- Before replacing a movie for quality reasons, prefer radarr_replacement_candidates so low-quality but high-scoring releases are visible before deletion. If Radarr's top scored candidate is same-or-worse quality but a better candidate exists, recommend the better candidate with a short reason and use selectedReleaseGuid + selectedReleaseIndexerId when the user authorizes that recommended override.
 - Use radarr_delete_movie / sonarr_delete_series (not the replace tools) when the user wants to remove a title entirely with no re-download. Always clarify whether they want deleteFiles=true (wipe from disk) or false (unmonitor only) if they haven't said.
 - For "wrong movie/show in Plex" or metadata issues, use plex_search → plex_get_matches → plex_apply_match. Show the candidate list and let the user pick before applying.
+- For quality audits, use plex_quality_audit first. If the user names one title, use plex_search → plex_quality_profile. Treat the audit as read-only; only offer radarr_replace_movie or sonarr_replace after showing the specific low-quality evidence and target title/episode.
 - Be concise. Markdown tables and short bullets where they help.
 - Format responses for a terminal: prefer flat bullets, short sections, and compact tables. Avoid nested bullet lists unless absolutely necessary.
+- When presenting user choices, format them as radio-style options, one per line: ( ) Option label - key evidence. Mark exactly one recommended option as (•) Recommended: .... Do this for replacement candidates, delete-vs-keep choices, yes/no choices, and any small set of mutually exclusive actions.
+- For destructive yes/no choices, make No the recommended/default option unless the user has already clearly requested the exact action. Never imply a destructive option is selected unless the next mutating tool call arguments exactly match that option.
 - Do not put blank lines between every bullet item. For long lists, group by heading and show the most important items first with a count of additional items.
 - If the user declines a confirmation, accept it — don't pester.`;
 
 export interface RunOptions {
   prompt: AsyncIterable<unknown>;
   canUseTool: CanUseTool;
+  onSubagentEvent?: (event: SubagentEvent) => void | Promise<void>;
 }
 
 export type AgentEvent =
@@ -90,8 +93,12 @@ function extractUserText(message: unknown): string | null {
   return typeof content === 'string' ? content : null;
 }
 
-export async function* run({ prompt, canUseTool }: RunOptions): AsyncIterable<AgentEvent> {
+export async function* run({ prompt, canUseTool, onSubagentEvent }: RunOptions): AsyncIterable<AgentEvent> {
   const messages: unknown[] = [];
+  const toolDescriptors = [
+    createMediaInvestigateTool(onSubagentEvent),
+    ...baseToolDescriptors,
+  ] as RuntimeTool[];
   const tools = toAiTools(toolDescriptors, canUseTool);
 
   for await (const input of prompt) {

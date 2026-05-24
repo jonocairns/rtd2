@@ -2,12 +2,18 @@ import readline from 'node:readline';
 import { run, type AgentEvent } from './agent.js';
 import { createConfirmGate } from './confirm.js';
 import type { AuditLog } from './audit.js';
+import type { SubagentEvent } from './investigator.js';
+import { baseToolDescriptors } from './tool-registry.js';
 import {
   banner,
   PROMPT,
   Spinner,
   renderMarkdown,
   toolCall,
+  subagentStart,
+  subagentToolCall,
+  subagentDone,
+  subagentError,
   error,
   usageLine,
   emptyUsage,
@@ -15,7 +21,7 @@ import {
   type TokenUsage,
 } from './ui.js';
 
-const TOOL_COUNT = 24;
+const TOOL_COUNT = baseToolDescriptors.length + 1; // + media_investigate
 
 interface PromptController {
   prompt: AsyncIterable<unknown>;
@@ -82,19 +88,32 @@ export async function startRepl({
   let pendingText = '';
 
   try {
-    for await (const event of run({ prompt: userPrompt.prompt, canUseTool })) {
+    const textBuffer: TextBuffer = {
+      get pendingText() {
+        return pendingText;
+      },
+      set pendingText(text: string) {
+        pendingText = text;
+      },
+    };
+    const onSubagentEvent = (event: SubagentEvent) => {
+      renderSubagentEvent(event, spinner, textBuffer);
+      if (event.type === 'tool_call') {
+        audit.append({
+          type: 'tool_call',
+          ts: new Date().toISOString(),
+          tool: `subagent#${event.id}:${event.name}`,
+          args: event.input ?? {},
+        });
+      }
+    };
+
+    for await (const event of run({ prompt: userPrompt.prompt, canUseTool, onSubagentEvent })) {
       if (event.type === 'user') {
         turn = emptyUsage();
         pendingText = '';
       }
-      const result = handleEvent(event, spinner, audit, {
-        get pendingText() {
-          return pendingText;
-        },
-        set pendingText(text: string) {
-          pendingText = text;
-        },
-      });
+      const result = handleEvent(event, spinner, audit, textBuffer);
       if (result.usage) {
         turn = addUsage(turn, result.usage);
         Object.assign(session, addUsage(session, result.usage));
@@ -122,6 +141,39 @@ interface TextBuffer {
   pendingText: string;
 }
 
+function flushPendingText(textBuffer: TextBuffer) {
+  if (textBuffer.pendingText.trim() !== '') {
+    console.log(renderMarkdown(textBuffer.pendingText));
+    textBuffer.pendingText = '';
+  }
+}
+
+function renderSubagentEvent(
+  event: SubagentEvent,
+  spinner: Spinner,
+  textBuffer: TextBuffer
+) {
+  spinner.stop();
+  flushPendingText(textBuffer);
+
+  switch (event.type) {
+    case 'start':
+      subagentStart(event.id, event.task);
+      break;
+    case 'tool_call':
+      subagentToolCall(event.id, event.name, JSON.stringify(event.input ?? {}));
+      break;
+    case 'done':
+      subagentDone(event.id, event.toolCallCount);
+      break;
+    case 'error':
+      subagentError(event.id, event.message);
+      break;
+  }
+
+  spinner.start('processing');
+}
+
 function handleEvent(
   event: AgentEvent,
   spinner: Spinner,
@@ -136,10 +188,7 @@ function handleEvent(
       return none;
     case 'tool_call':
       spinner.stop();
-      if (textBuffer.pendingText.trim() !== '') {
-        console.log(renderMarkdown(textBuffer.pendingText));
-        textBuffer.pendingText = '';
-      }
+      flushPendingText(textBuffer);
       toolCall(event.name, JSON.stringify(event.input ?? {}));
       audit.append({
         type: 'tool_call',
@@ -161,10 +210,7 @@ function handleEvent(
       };
     case 'assistant_done':
       spinner.stop();
-      if (textBuffer.pendingText.trim() !== '') {
-        console.log(renderMarkdown(textBuffer.pendingText));
-        textBuffer.pendingText = '';
-      }
+      flushPendingText(textBuffer);
       return { usage: null, finalText: true };
     case 'user':
       return none;

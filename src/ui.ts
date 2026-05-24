@@ -98,6 +98,26 @@ export function toolCall(name: string, args: string) {
   console.log(`${colors.dim}⚙${colors.reset} ${colors.cyan}${name}${colors.reset} ${colors.gray}${summary}${colors.reset}`);
 }
 
+export function subagentStart(id: number, task: string) {
+  const summary = task.length > 96 ? task.slice(0, 93) + '…' : task;
+  console.log(`${colors.magenta}┌ subagent #${id}${colors.reset} ${colors.gray}${summary}${colors.reset}`);
+}
+
+export function subagentToolCall(id: number, name: string, args: string) {
+  const summary = args.length > 88 ? args.slice(0, 85) + '…' : args;
+  console.log(`${colors.magenta}│${colors.reset} ${colors.dim}⚙${colors.reset} ${colors.cyan}${name}${colors.reset} ${colors.gray}${summary}${colors.reset}`);
+}
+
+export function subagentDone(id: number, toolCallCount: number) {
+  const noun = toolCallCount === 1 ? 'tool call' : 'tool calls';
+  console.log(`${colors.magenta}└ subagent #${id} done${colors.reset} ${colors.gray}${toolCallCount} ${noun}${colors.reset}`);
+}
+
+export function subagentError(id: number, message: string) {
+  const summary = message.length > 96 ? message.slice(0, 93) + '…' : message;
+  console.log(`${colors.magenta}└ subagent #${id} failed${colors.reset} ${colors.red}${summary}${colors.reset}`);
+}
+
 export function box(title: string, body: string[], color = colors.yellow) {
   const stripped = body.map(stripAnsi);
   const inner = Math.max(stripped.reduce((m, l) => Math.max(m, l.length), 0), title.length + 4);
@@ -109,6 +129,16 @@ export function box(title: string, body: string[], color = colors.yellow) {
     console.log(`${color}│${colors.reset} ${body[i]}${pad} ${color}│${colors.reset}`);
   }
   console.log(`${color}╰${'─'.repeat(inner + 2)}╯${colors.reset}`);
+}
+
+export function yesNoChoices(opts?: { yesLabel?: string; noLabel?: string; recommended?: 'yes' | 'no' }) {
+  const recommended = opts?.recommended ?? 'no';
+  const yes = opts?.yesLabel ?? 'Yes, proceed';
+  const no = opts?.noLabel ?? 'No, cancel';
+  return [
+    `${recommended === 'yes' ? '(•)' : '( )'} ${yes}`,
+    `${recommended === 'no' ? '(•)' : '( )'} ${no}`,
+  ];
 }
 
 export function ok(msg: string) {

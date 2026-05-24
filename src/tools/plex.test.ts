@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { plex_apply_match, plex_search, plex_unwatched } from './plex.js';
+import {
+  plex_apply_match,
+  plex_quality_audit,
+  plex_quality_profile,
+  plex_search,
+  plex_unwatched,
+} from './plex.js';
 import { installFetchMock, invoke, route } from './_testing.js';
 import { resetIdempotencyForTests } from './idempotency.js';
 
@@ -147,5 +153,215 @@ describe('plex_unwatched', () => {
 
     const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed.summary).toMatch(/shows, sort: highest_rated/);
+  });
+});
+
+describe('plex_quality_profile', () => {
+  it('returns container, codec, resolution, file size, path, and audio tracks', async () => {
+    installFetchMock([
+      route('GET', '/library/metadata/777', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              {
+                ratingKey: '777',
+                title: 'Dune',
+                type: 'movie',
+                year: 2021,
+                Media: [
+                  {
+                    bitrate: 8100,
+                    width: 3840,
+                    height: 2160,
+                    videoCodec: 'hevc',
+                    Part: [
+                      {
+                        file: '/media/Dune.mkv',
+                        size: 25 * 1024 ** 3,
+                        container: 'mkv',
+                        Stream: [
+                          { streamType: 1, codec: 'hevc', width: 3840, height: 2160 },
+                          {
+                            streamType: 2,
+                            codec: 'truehd',
+                            channels: 8,
+                            audioChannelLayout: '7.1',
+                            languageCode: 'eng',
+                            title: 'English TrueHD 7.1',
+                            bitrate: 4200,
+                            selected: true,
+                            default: true,
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_quality_profile, { ratingKey: '777' });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(parsed).toMatchObject({
+      ratingKey: '777',
+      title: 'Dune (2021)',
+      container: 'mkv',
+      videoCodec: 'hevc',
+      resolution: '2160p',
+      bitrateKbps: 8100,
+      fileSizeGiB: 25,
+      path: '/media/Dune.mkv',
+    });
+    expect(parsed.audioTracks).toEqual([
+      {
+        codec: 'truehd',
+        profile: null,
+        channels: 8,
+        layout: '7.1',
+        language: 'eng',
+        title: 'English TrueHD 7.1',
+        bitrateKbps: 4200,
+        selected: true,
+        default: true,
+      },
+    ]);
+  });
+});
+
+describe('plex_quality_audit', () => {
+  it('flags likely low-quality movie files and sorts weakest first', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/1/all', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              {
+                ratingKey: '1',
+                title: 'Good 4K',
+                type: 'movie',
+                year: 2023,
+                Media: [
+                  {
+                    bitrate: 16000,
+                    width: 3840,
+                    height: 2160,
+                    videoCodec: 'hevc',
+                    Part: [{ file: '/media/Good.mkv', size: 32 * 1024 ** 3, container: 'mkv', Stream: [] }],
+                  },
+                ],
+              },
+              {
+                ratingKey: '2',
+                title: 'Tiny 720p',
+                type: 'movie',
+                year: 1998,
+                Media: [
+                  {
+                    bitrate: 1800,
+                    width: 1280,
+                    height: 720,
+                    videoCodec: 'h264',
+                    Part: [
+                      {
+                        file: '/media/Tiny.mp4',
+                        size: 1.4 * 1024 ** 3,
+                        container: 'mp4',
+                        Stream: [
+                          { streamType: 1, codec: 'h264', width: 1280, height: 720 },
+                          { streamType: 2, codec: 'aac', channels: 2, languageCode: 'eng' },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+      route('GET', '/library/sections', {
+        json: {
+          MediaContainer: {
+            Directory: [{ key: '1', type: 'movie', title: 'Movies' }],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_quality_audit, {
+      section: 'movies',
+      minHeight: 1080,
+      minBitrateKbps: 2500,
+      preferredVideoCodecs: ['hevc', 'av1'],
+      preferredContainers: ['mkv'],
+    });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+
+    expect(calls.some((c) => c.url.includes('/library/sections/1/all'))).toBe(true);
+    expect(parsed.summary).toBe('1 quality issue (movies)');
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0]).toMatchObject({
+      title: 'Tiny 720p (1998)',
+      container: 'mp4',
+      videoCodec: 'h264',
+      resolution: '720p',
+      bitrateKbps: 1800,
+      fileSizeGiB: 1.4,
+      flags: [
+        'resolution below 1080p',
+        'bitrate below 2500 kbps',
+        'video codec is h264',
+        'container is mp4',
+      ],
+    });
+  });
+
+  it('audits show sections as episode files', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/2/all', {
+        json: {
+          MediaContainer: {
+            Metadata: [
+              {
+                ratingKey: '9',
+                title: 'Pilot',
+                type: 'episode',
+                grandparentTitle: 'Severance',
+                parentIndex: 1,
+                index: 1,
+                Media: [
+                  {
+                    height: 480,
+                    videoCodec: 'h264',
+                    Part: [{ container: 'mkv', Stream: [{ streamType: 2, codec: 'aac', channels: 2 }] }],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+      route('GET', '/library/sections', {
+        json: {
+          MediaContainer: {
+            Directory: [{ key: '2', type: 'show', title: 'TV Shows' }],
+          },
+        },
+      }),
+    ]);
+
+    const result = await invoke(plex_quality_audit, { section: 'shows', minHeight: 720 });
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    const allCall = calls.find((c) => c.url.includes('/library/sections/2/all'));
+    const url = new URL(allCall?.url ?? '');
+
+    expect(url.searchParams.get('type')).toBe('4');
+    expect(parsed.items[0].title).toBe('Severance S01E01 - Pilot');
+    expect(parsed.items[0].flags).toEqual(['resolution below 720p']);
   });
 });

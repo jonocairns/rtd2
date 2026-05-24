@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { env } from '../env.js';
 import { safe } from './errors.js';
 import { once } from './idempotency.js';
+import { envelope } from './output.js';
 
 function requireConfig(): { url: string; key: string } {
   if (!env.RADARR_URL || !env.RADARR_API_KEY) {
@@ -46,9 +47,247 @@ interface RadarrMovie {
   movieFile?: { id: number; relativePath?: string; size?: number; quality?: { quality?: { name?: string } } };
 }
 
+interface RadarrRelease {
+  guid?: string;
+  indexerId?: number;
+  title?: string;
+  indexer?: string;
+  size?: number;
+  age?: number;
+  language?: string;
+  quality?: { quality?: { name?: string } };
+  customFormatScore?: number;
+  preferredWordScore?: number;
+  releaseWeight?: number;
+  rejected?: boolean;
+  rejections?: string[];
+}
+
+interface RadarrCommand {
+  id: number;
+  name?: string;
+  status?: string;
+  movieId?: number;
+  movieIds?: number[];
+  body?: { movieId?: number; movieIds?: number[] };
+}
+
+function commandMatchesMovie(command: RadarrCommand, commandId: number, movieId: number): boolean {
+  if (command.id === commandId) return true;
+  const ids = command.movieIds ?? command.body?.movieIds ?? [];
+  return (
+    command.name === 'MoviesSearch' &&
+    (command.movieId === movieId || command.body?.movieId === movieId || ids.includes(movieId))
+  );
+}
+
+const QUALITY_RANKS: Array<[RegExp, number]> = [
+  [/2160|uhd|4k/i, 4000],
+  [/1080/i, 3000],
+  [/720/i, 2000],
+  [/dvd|576|480/i, 1000],
+];
+
+function qualityRank(name?: string | null): number | null {
+  if (!name) return null;
+  const hit = QUALITY_RANKS.find(([pattern]) => pattern.test(name));
+  return hit?.[1] ?? null;
+}
+
+function qualityFloorName(rank: number | null): string | null {
+  if (rank === null) return null;
+  if (rank >= 4000) return '2160p';
+  if (rank >= 3000) return '1080p';
+  if (rank >= 2000) return '720p';
+  return 'DVD/480p';
+}
+
+function sizeGiB(size?: number): number | null {
+  return typeof size === 'number' ? Number((size / 1024 ** 3).toFixed(2)) : null;
+}
+
+function releaseScore(release: RadarrRelease): number {
+  return release.customFormatScore ?? release.preferredWordScore ?? release.releaseWeight ?? 0;
+}
+
+function formatRelease(release: RadarrRelease) {
+  const quality = release.quality?.quality?.name ?? null;
+  return {
+    guid: release.guid ?? null,
+    indexerId: release.indexerId ?? null,
+    title: release.title ?? null,
+    indexer: release.indexer ?? null,
+    quality,
+    qualityRank: qualityRank(quality),
+    sizeGiB: sizeGiB(release.size),
+    ageDays: release.age ?? null,
+    score: releaseScore(release),
+    rejected: release.rejected ?? false,
+    rejections: release.rejections ?? [],
+  };
+}
+
+async function candidateReleases(
+  movieId: number,
+  take?: number,
+  opts: { includeRejected?: boolean } = {}
+) {
+  const releases = await radarrApi<RadarrRelease[]>(`/release?movieId=${movieId}`);
+  return releases
+    .filter((release) => opts.includeRejected || !release.rejected)
+    .sort((a, b) => releaseScore(b) - releaseScore(a))
+    .slice(0, take ?? releases.length);
+}
+
+async function replacementCandidates(movieId: number, take = 8, includeRejected = false) {
+  return (await candidateReleases(movieId, take, { includeRejected }))
+    .map(formatRelease);
+}
+
+async function selectedRelease(movieId: number, guid: string, indexerId?: number): Promise<RadarrRelease> {
+  const releases = await candidateReleases(movieId, undefined, { includeRejected: true });
+  const selected = releases.find(
+    (release) =>
+      release.guid === guid &&
+      (indexerId === undefined || release.indexerId === indexerId)
+  );
+  if (!selected) {
+    throw new Error(
+      indexerId === undefined
+        ? `Selected Radarr release guid ${guid} was not found in current candidates.`
+        : `Selected Radarr release guid ${guid} from indexer ${indexerId} was not found in current candidates.`
+    );
+  }
+  return selected;
+}
+
+async function replacementSafety(movie: RadarrMovie, selected?: RadarrRelease): Promise<{
+  ok: boolean;
+  topCandidate: ReturnType<typeof formatRelease> | null;
+  selectedCandidate: ReturnType<typeof formatRelease> | null;
+  floorRank: number | null;
+  floorName: string | null;
+  reason: string | null;
+}> {
+  const currentQuality = movie.movieFile?.quality?.quality?.name ?? null;
+  const currentRank = qualityRank(currentQuality);
+  const floorRank = currentRank ?? 3000;
+  const candidates = selected ? [] : await replacementCandidates(movie.id, 5);
+  const topCandidate = selected ? null : (candidates[0] ?? null);
+  const candidate = selected ? formatRelease(selected) : topCandidate;
+
+  if (!candidate) {
+    return {
+      ok: false,
+      topCandidate: null,
+      selectedCandidate: null,
+      floorRank,
+      floorName: qualityFloorName(floorRank),
+      reason: 'No acceptable Radarr release candidates were returned.',
+    };
+  }
+
+  if (candidate.qualityRank === null) {
+    return {
+      ok: false,
+      topCandidate,
+      selectedCandidate: selected ? candidate : null,
+      floorRank,
+      floorName: qualityFloorName(floorRank),
+      reason: `${selected ? 'Selected' : 'Top'} Radarr candidate has unknown quality, so it cannot be compared with the replacement floor ${qualityFloorName(floorRank)}.`,
+    };
+  }
+
+  if (candidate.qualityRank < floorRank) {
+    return {
+      ok: false,
+      topCandidate,
+      selectedCandidate: selected ? candidate : null,
+      floorRank,
+      floorName: qualityFloorName(floorRank),
+      reason: `${selected ? 'Selected' : 'Top'} Radarr candidate is ${candidate.quality ?? 'unknown quality'}, below the replacement floor ${qualityFloorName(floorRank)}.`,
+    };
+  }
+
+  return {
+    ok: true,
+    topCandidate,
+    selectedCandidate: selected ? candidate : null,
+    floorRank,
+    floorName: qualityFloorName(floorRank),
+    reason: null,
+  };
+}
+
+export async function guardReplaceMovie(input: {
+  tmdbId: number;
+  allowQualityDowngrade?: boolean;
+  selectedReleaseGuid?: string;
+  selectedReleaseIndexerId?: number;
+}): Promise<{ ok: true } | { ok: false; lines: string[]; message: string }> {
+  if (input.allowQualityDowngrade || input.selectedReleaseGuid) return { ok: true };
+
+  const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${input.tmdbId}`);
+  const movie = matches[0];
+  if (!movie) return { ok: true };
+
+  const safety = await replacementSafety(movie);
+  if (safety.ok) return { ok: true };
+
+  const lines = [
+    `Automatic Radarr replacement blocked: ${movie.title} (${movie.year})`,
+    `  Reason: ${safety.reason}`,
+    `  Current quality floor: ${safety.floorName ?? 'unknown'}`,
+    `  Next step: inspect radarr_replacement_candidates, recommend a specific candidate, then retry with selectedReleaseGuid + selectedReleaseIndexerId.`,
+  ];
+  return {
+    ok: false,
+    lines,
+    message:
+      `Automatic Radarr replacement was blocked before confirmation: ${safety.reason} ` +
+      'Call radarr_replacement_candidates, recommend a specific candidate with reasoning, and only retry radarr_replace_movie with selectedReleaseGuid + selectedReleaseIndexerId or an explicit allowQualityDowngrade=true from the user.',
+  };
+}
+
+async function checkReplaceMovie(opts: {
+  tmdbId: number;
+  movieId: number;
+  commandId: number;
+  expectedFileDeleted: boolean;
+}): Promise<Record<string, unknown>> {
+  try {
+    const [matches, commands] = await Promise.all([
+      radarrApi<RadarrMovie[]>(`/movie?tmdbId=${opts.tmdbId}`),
+      radarrApi<RadarrCommand[]>('/command'),
+    ]);
+    const movie = matches[0];
+    const hasFileAfter = movie?.hasFile ?? null;
+    const searchCommandVisible = commands.some((command) =>
+      commandMatchesMovie(command, opts.commandId, opts.movieId)
+    );
+    const fileStateOk = opts.expectedFileDeleted ? hasFileAfter === false : true;
+
+    return {
+      ok: fileStateOk && searchCommandVisible,
+      hasFileAfter,
+      expectedFileDeleted: opts.expectedFileDeleted,
+      fileStateOk,
+      searchCommandVisible,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 export async function resolveReplaceMovie(input: {
   tmdbId: number;
   keepFile?: boolean;
+  allowQualityDowngrade?: boolean;
+  selectedReleaseGuid?: string;
+  selectedReleaseIndexerId?: number;
 }): Promise<string[]> {
   const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${input.tmdbId}`);
   const movie = matches[0];
@@ -71,11 +310,74 @@ export async function resolveReplaceMovie(input: {
   }
   lines.push(
     input.keepFile
-      ? `  Action: trigger MoviesSearch (keep existing file)`
-      : `  Action: delete file + trigger MoviesSearch`
+      ? `  Action: ${input.selectedReleaseGuid ? 'grab selected release' : 'trigger MoviesSearch'} (keep existing file)`
+      : `  Action: delete file + ${input.selectedReleaseGuid ? 'grab selected release' : 'trigger MoviesSearch'}`
   );
+  if (input.allowQualityDowngrade) {
+    lines.push(`  Safety override: quality downgrade allowed`);
+  }
+
+  try {
+    const selected = input.selectedReleaseGuid
+      ? await selectedRelease(movie.id, input.selectedReleaseGuid, input.selectedReleaseIndexerId)
+      : undefined;
+    const safety = await replacementSafety(movie, selected);
+    const candidate = safety.selectedCandidate ?? safety.topCandidate;
+    if (candidate) {
+      lines.push(
+        `  ${selected ? 'Selected' : 'Top'} candidate: ${candidate.quality ?? 'unknown quality'}, ${candidate.sizeGiB ?? '?'} GiB, score ${candidate.score}`
+      );
+      if (candidate.title) lines.push(`  Candidate title: ${candidate.title}`);
+    }
+    if (!safety.ok) {
+      lines.push(`  Warning: ${safety.reason}`);
+    }
+  } catch (e) {
+    lines.push(`  Warning: could not inspect replacement candidates: ${e instanceof Error ? e.message : String(e)}`);
+  }
   return lines;
 }
+
+export const radarr_replacement_candidates = tool(
+  'radarr_replacement_candidates',
+  'Read-only preflight for a Radarr movie replacement. Shows the current file and top releases sorted by Radarr score, including rejected/manual candidates plus guid/indexerId for manual selection. Use this to recommend a specific candidate when Radarr\'s automatic choice has no acceptable candidate or is same-or-worse quality.',
+  {
+    tmdbId: z.number().int().describe('TMDb ID of the movie'),
+    count: z.number().int().min(1).max(20).optional().describe('Number of candidates to return (default 8)'),
+  },
+  safe(async ({ tmdbId, count }) => {
+    const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
+    const movie = matches[0];
+    if (!movie) {
+      throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
+    }
+
+    const currentQuality = movie.movieFile?.quality?.quality?.name ?? null;
+    const currentRank = qualityRank(currentQuality);
+    const candidates = await replacementCandidates(movie.id, count ?? 8, true);
+    const acceptableCandidates = candidates.filter((candidate) => !candidate.rejected);
+    return envelope(`${candidates.length} Radarr replacement candidates for ${movie.title} (${movie.year})`, candidates, {
+      currentFile: movie.movieFile
+        ? {
+            path: movie.movieFile.relativePath ?? null,
+            quality: currentQuality,
+            qualityRank: currentRank,
+            sizeGiB: sizeGiB(movie.movieFile.size),
+          }
+        : null,
+      safety: {
+        replacementFloor: qualityFloorName(currentRank ?? 3000),
+        acceptableCandidateCount: acceptableCandidates.length,
+        noAcceptableCandidates: acceptableCandidates.length === 0,
+        topCandidateBelowFloor:
+          acceptableCandidates[0]?.qualityRank !== null &&
+          acceptableCandidates[0]?.qualityRank !== undefined &&
+          acceptableCandidates[0].qualityRank < (currentRank ?? 3000),
+      },
+    });
+  }),
+  { annotations: { readOnlyHint: true } }
+);
 
 export async function resolveDeleteMovie(input: {
   tmdbId: number;
@@ -160,26 +462,53 @@ export const radarr_delete_movie = tool(
 
 export const radarr_replace_movie = tool(
   'radarr_replace_movie',
-  'Delete the current file for a movie in Radarr and trigger a fresh search for a replacement. Use when a downloaded release is bad (wrong cut, encoding issue, mislabeled). Requires the TMDb ID — call overseerr_search first. **MUTATING**: deletes the existing file.',
+  'Delete the current file for a movie in Radarr and either trigger a fresh automatic search or grab a selected release. Refuses to delete when the automatic top candidate or selected candidate is below the current quality floor unless allowQualityDowngrade=true. Use radarr_replacement_candidates first when quality matters, then pass selectedReleaseGuid + selectedReleaseIndexerId for a user-approved recommended candidate. Requires the TMDb ID — call overseerr_search first. **MUTATING**: deletes the existing file unless keepFile=true.',
   {
     tmdbId: z.number().int().describe('TMDb ID of the movie'),
     keepFile: z
       .boolean()
       .optional()
       .describe('If true, skip the file deletion and only trigger a new search. Default false.'),
+    allowQualityDowngrade: z
+      .boolean()
+      .optional()
+      .describe('If true, allow replacement even when Radarr\'s top candidate is below the current/default quality floor. Default false.'),
+    selectedReleaseGuid: z
+      .string()
+      .optional()
+      .describe('Optional release guid from radarr_replacement_candidates. If provided, grab this exact release instead of triggering MoviesSearch.'),
+    selectedReleaseIndexerId: z
+      .number()
+      .int()
+      .optional()
+      .describe('Optional release indexerId from radarr_replacement_candidates. Recommended with selectedReleaseGuid to disambiguate releases.'),
   },
-  safe(async ({ tmdbId, keepFile }) =>
-    once(`radarr_replace_movie:${tmdbId}:${keepFile ?? false}`, async () => {
+  safe(async ({ tmdbId, keepFile, allowQualityDowngrade, selectedReleaseGuid, selectedReleaseIndexerId }) =>
+    once(
+      `radarr_replace_movie:${tmdbId}:${keepFile ?? false}:${allowQualityDowngrade ?? false}:${selectedReleaseGuid ?? 'auto'}:${selectedReleaseIndexerId ?? 'any'}`,
+      async () => {
       const matches = await radarrApi<RadarrMovie[]>(`/movie?tmdbId=${tmdbId}`);
       const movie = matches[0];
       if (!movie) {
         throw new Error(`No Radarr movie found for TMDb ID ${tmdbId}. The title may not be managed by Radarr.`);
       }
 
+      const releaseToGrab = selectedReleaseGuid
+        ? await selectedRelease(movie.id, selectedReleaseGuid, selectedReleaseIndexerId)
+        : null;
+      const safety = await replacementSafety(movie, releaseToGrab ?? undefined);
+      if (!allowQualityDowngrade && !safety.ok) {
+        throw new Error(
+          `${safety.reason} Refusing to delete the current file. Inspect radarr_replacement_candidates or retry with allowQualityDowngrade=true if this is intentional.`
+        );
+      }
+
       const result: Record<string, unknown> = {
         radarrId: movie.id,
         title: movie.title,
         year: movie.year,
+        replacementPreflight: safety,
+        replacementMode: releaseToGrab ? 'selected_release' : 'automatic_search',
       };
 
       if (!keepFile && movie.hasFile && movie.movieFile?.id) {
@@ -192,16 +521,32 @@ export const radarr_replace_movie = tool(
         result.deleted = null;
       }
 
-      const command = await radarrApi<{ id: number; name: string; status: string }>('/command', {
-        method: 'POST',
-        body: JSON.stringify({ name: 'MoviesSearch', movieIds: [movie.id] }),
-      });
-      result.searchCommand = { id: command.id, status: command.status };
+      if (releaseToGrab) {
+        const grabbed = await radarrApi('/release', {
+          method: 'POST',
+          body: JSON.stringify(releaseToGrab),
+        });
+        result.grabbedRelease = safety.selectedCandidate;
+        result.releaseGrab = grabbed ?? { ok: true };
+      } else {
+        const command = await radarrApi<{ id: number; name: string; status: string }>('/command', {
+          method: 'POST',
+          body: JSON.stringify({ name: 'MoviesSearch', movieIds: [movie.id] }),
+        });
+        result.searchCommand = { id: command.id, status: command.status };
+        result.selfCheck = await checkReplaceMovie({
+          tmdbId,
+          movieId: movie.id,
+          commandId: command.id,
+          expectedFileDeleted: !keepFile && movie.hasFile && Boolean(movie.movieFile?.id),
+        });
+      }
 
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
-    })
+    }
+    )
   ),
   { annotations: { readOnlyHint: false } }
 );

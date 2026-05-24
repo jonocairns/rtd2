@@ -70,6 +70,90 @@ interface SonarrEpisode {
   title: string;
 }
 
+interface SonarrCommand {
+  id: number;
+  name?: string;
+  status?: string;
+  seriesId?: number;
+  seasonNumber?: number;
+  episodeId?: number;
+  episodeIds?: number[];
+  body?: { seriesId?: number; seasonNumber?: number; episodeId?: number; episodeIds?: number[] };
+}
+
+function commandMatchesTarget(
+  command: SonarrCommand,
+  opts: {
+    commandId: number;
+    seriesId: number;
+    seasonNumber: number;
+    episodeIds: number[];
+    episodeNumber?: number;
+  }
+): boolean {
+  if (command.id === opts.commandId) return true;
+  const episodeIds = command.episodeIds ?? command.body?.episodeIds ?? [];
+  if (opts.episodeNumber !== undefined) {
+    return (
+      command.name === 'EpisodeSearch' &&
+      opts.episodeIds.every(
+        (id) => episodeIds.includes(id) || command.episodeId === id || command.body?.episodeId === id
+      )
+    );
+  }
+  return (
+    command.name === 'SeasonSearch' &&
+    (command.seriesId === opts.seriesId || command.body?.seriesId === opts.seriesId) &&
+    (command.seasonNumber === opts.seasonNumber || command.body?.seasonNumber === opts.seasonNumber)
+  );
+}
+
+async function checkReplace(opts: {
+  seriesId: number;
+  seasonNumber: number;
+  episodeNumber?: number;
+  episodeIds: number[];
+  deletedFileIds: number[];
+  commandId: number;
+}): Promise<Record<string, unknown>> {
+  try {
+    const [episodes, commands] = await Promise.all([
+      sonarrApi<SonarrEpisode[]>(`/episode?seriesId=${opts.seriesId}&seasonNumber=${opts.seasonNumber}`),
+      sonarrApi<SonarrCommand[]>('/command'),
+    ]);
+    const targets =
+      opts.episodeNumber !== undefined
+        ? episodes.filter((episode) => episode.episodeNumber === opts.episodeNumber)
+        : episodes.filter((episode) => opts.episodeIds.includes(episode.id));
+    const deletedFileIds = new Set(opts.deletedFileIds);
+    const stillAttachedDeletedFiles = targets.filter(
+      (episode) => episode.hasFile && deletedFileIds.has(episode.episodeFileId)
+    );
+    const fileStateOk = stillAttachedDeletedFiles.length === 0;
+    const searchCommandVisible = commands.some((command) =>
+      commandMatchesTarget(command, opts)
+    );
+
+    return {
+      ok: fileStateOk && searchCommandVisible,
+      targetedEpisodesAfter: targets.length,
+      expectedFilesDeleted: opts.deletedFileIds.length,
+      stillAttachedDeletedFiles: stillAttachedDeletedFiles.map((episode) => ({
+        season: episode.seasonNumber,
+        episode: episode.episodeNumber,
+        episodeFileId: episode.episodeFileId,
+      })),
+      fileStateOk,
+      searchCommandVisible,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 export async function resolveReplace(input: {
   tmdbId: number;
   seasonNumber: number;
@@ -270,6 +354,14 @@ export const sonarr_replace = tool(
                   episode: episodeNumber ?? null,
                   deleted,
                   searchCommand: { id: command.id, status: command.status },
+                  selfCheck: await checkReplace({
+                    seriesId: series.id,
+                    seasonNumber,
+                    episodeNumber,
+                    episodeIds: targets.map((target) => target.id),
+                    deletedFileIds: deleted.map((entry) => entry.episodeFileId),
+                    commandId: command.id,
+                  }),
                 },
                 null,
                 2

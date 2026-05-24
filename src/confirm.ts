@@ -1,8 +1,8 @@
 import type readline from 'node:readline';
-import { box, colors, Spinner, stripAnsi } from './ui.js';
+import { box, colors, Spinner, stripAnsi, yesNoChoices } from './ui.js';
 import type { AuditLog } from './audit.js';
 import { resolveCreateRequest, resolveRequestAction } from './tools/overseerr.js';
-import { resolveDeleteMovie, resolveReplaceMovie } from './tools/radarr.js';
+import { guardReplaceMovie, resolveDeleteMovie, resolveReplaceMovie } from './tools/radarr.js';
 import { resolveDeleteSeries, resolveReplace } from './tools/sonarr.js';
 import { resolveApplyMatch } from './tools/plex.js';
 
@@ -99,10 +99,46 @@ export function createConfirmGate({ rl, spinner, yolo, audit }: ConfirmGateOptio
     }
     spinner.stop();
 
-    box('Confirmation required', lines);
+    if (displayName === 'radarr_replace_movie') {
+      try {
+        const guard = await guardReplaceMovie(input as Parameters<typeof guardReplaceMovie>[0]);
+        if (!guard.ok) {
+          box('Replacement blocked', guard.lines, colors.red);
+          audit.append({
+            type: 'confirm_decision',
+            ts: new Date().toISOString(),
+            tool: displayName,
+            args: input,
+            resolved: guard.lines.map(stripAnsi),
+            decision: 'declined',
+          });
+          spinner.start('processing');
+          return {
+            behavior: 'deny',
+            message: guard.message,
+          };
+        }
+      } catch {
+        // The resolver already surfaced lookup failures. Let the normal
+        // confirmation path handle unusual preflight errors rather than hiding
+        // the original operation from the user.
+      }
+    }
+
+    const choiceLines = yesNoChoices({
+      yesLabel: 'Yes, run this exact tool call',
+      noLabel: 'No, cancel (default)',
+      recommended: 'no',
+    });
+
+    box('Confirmation required', [
+      ...lines,
+      '',
+      ...choiceLines,
+    ]);
 
     const answer: string = await new Promise((resolve) =>
-      rl.question(`${colors.yellow}Proceed? [y/N] ${colors.reset}`, resolve)
+      rl.question(`${colors.yellow}Choose [y/N] ${colors.reset}`, resolve)
     );
 
     const proceed = answer.trim().toLowerCase() === 'y';
@@ -113,7 +149,7 @@ export function createConfirmGate({ rl, spinner, yolo, audit }: ConfirmGateOptio
       ts: new Date().toISOString(),
       tool: displayName,
       args: input,
-      resolved: lines.map(stripAnsi),
+      resolved: [...lines, '', ...choiceLines].map(stripAnsi),
       decision: proceed ? 'approved' : 'declined',
     });
 

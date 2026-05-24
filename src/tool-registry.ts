@@ -22,10 +22,12 @@ import {
   plex_watch_history,
   plex_unwatched,
   plex_search,
+  plex_quality_profile,
+  plex_quality_audit,
   plex_get_matches,
   plex_apply_match,
 } from './tools/plex.js';
-import { radarr_replace_movie, radarr_delete_movie } from './tools/radarr.js';
+import { radarr_replace_movie, radarr_delete_movie, radarr_replacement_candidates } from './tools/radarr.js';
 import { sonarr_replace, sonarr_delete_series } from './tools/sonarr.js';
 import type { RuntimeTool } from './tool-runtime.js';
 
@@ -51,8 +53,11 @@ export const baseToolDescriptors = [
   plex_watch_history,
   plex_unwatched,
   plex_search,
+  plex_quality_profile,
+  plex_quality_audit,
   plex_get_matches,
   plex_apply_match,
+  radarr_replacement_candidates,
   radarr_replace_movie,
   radarr_delete_movie,
   sonarr_replace,
