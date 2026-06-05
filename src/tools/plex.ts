@@ -64,6 +64,10 @@ async function plexApi<T = unknown>(
   return JSON.parse(text) as T;
 }
 
+interface PlexGuid {
+  id: string;
+}
+
 interface PlexMetadata {
   ratingKey?: string;
   title: string;
@@ -81,6 +85,7 @@ interface PlexMetadata {
   viewedLeafCount?: number;
   librarySectionID?: number;
   guid?: string;
+  Guid?: PlexGuid[];
   Media?: PlexMedia[];
 }
 
@@ -468,6 +473,146 @@ export const plex_search = tool(
       }));
 
     return envelope(`${plural(items.length, 'Plex item')} matching "${query}"`, items);
+  }),
+  { annotations: { readOnlyHint: true } }
+);
+
+interface LibraryIndex {
+  byImdb: Map<string, PlexMetadata>;
+  byTmdb: Map<string, PlexMetadata>;
+  byTvdb: Map<string, PlexMetadata>;
+  byTitleYear: Map<string, PlexMetadata>;
+  total: number;
+}
+
+function normalizeTitleKey(title: string, year?: number): string {
+  // Lowercase, collapse non-alphanumerics — matches "The Fly!" against "The Fly" and survives ":"/"-" variants.
+  const t = title.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return `${t}|${year ?? ''}`;
+}
+
+function indexLibrary(items: PlexMetadata[]): LibraryIndex {
+  const byImdb = new Map<string, PlexMetadata>();
+  const byTmdb = new Map<string, PlexMetadata>();
+  const byTvdb = new Map<string, PlexMetadata>();
+  const byTitleYear = new Map<string, PlexMetadata>();
+  for (const m of items) {
+    for (const g of m.Guid ?? []) {
+      if (g.id.startsWith('imdb://')) byImdb.set(g.id.slice(7), m);
+      else if (g.id.startsWith('tmdb://')) byTmdb.set(g.id.slice(7), m);
+      else if (g.id.startsWith('tvdb://')) byTvdb.set(g.id.slice(7), m);
+    }
+    if (m.title && m.year) {
+      const key = normalizeTitleKey(m.title, m.year);
+      if (!byTitleYear.has(key)) byTitleYear.set(key, m);
+    }
+  }
+  return { byImdb, byTmdb, byTvdb, byTitleYear, total: items.length };
+}
+
+async function loadLibraryIndex(filter: 'movies' | 'shows' | 'all'): Promise<LibraryIndex> {
+  const sections = await listSections();
+  const wanted = pickSections(sections, filter);
+  if (wanted.length === 0) return { byImdb: new Map(), byTmdb: new Map(), byTvdb: new Map(), byTitleYear: new Map(), total: 0 };
+  const responses = await Promise.all(
+    wanted.map((sec) =>
+      plexApi<PlexResponse>(`/library/sections/${sec.key}/all`, {
+        'X-Plex-Container-Start': '0',
+        'X-Plex-Container-Size': '100000',
+        includeGuids: '1',
+      })
+    )
+  );
+  const all = responses.flatMap((data) => data.MediaContainer.Metadata ?? []);
+  return indexLibrary(all);
+}
+
+export const plex_check_presence = tool(
+  'plex_check_presence',
+  'Batch-check whether titles are in the Plex library. Pass an array of identifiers (TMDb id preferred; IMDb id and TVDb id also matched; title+year is a fallback). Fetches the library once and diffs in-process — use this instead of looping plex_search for "what am I missing from this list of N titles". Pair with mdblist_list to import a curated list and identify gaps. Returns a per-input verdict plus presentCount / missingCount.',
+  {
+    items: z
+      .array(
+        z
+          .object({
+            tmdbId: z.number().int().optional(),
+            imdbId: z.string().optional(),
+            tvdbId: z.number().int().optional(),
+            title: z.string().optional(),
+            year: z.number().int().optional(),
+            mediaType: z.enum(['movie', 'tv']).optional(),
+          })
+          .refine(
+            (v) => v.tmdbId != null || v.imdbId != null || v.tvdbId != null || (v.title != null && v.year != null),
+            { message: 'Each item needs at least one of: tmdbId, imdbId, tvdbId, or both title + year.' }
+          )
+      )
+      .min(1)
+      .max(5000)
+      .describe('Items to check. Provide TMDb id when available; IMDb/TVDb/title+year are fallbacks.'),
+    section: sectionSchema
+      .optional()
+      .describe('Which library section type to check against (default "all"). Accepts movie/movies, show/shows, series, tv, or all.'),
+    returnOnly: z
+      .enum(['all', 'missing', 'present'])
+      .optional()
+      .describe('Filter the returned items. Default "all" returns one row per input; "missing" or "present" prunes the response.'),
+  },
+  safe(async ({ items, section, returnOnly }) => {
+    const filter = (normalizeSection(section ?? 'all') as 'movies' | 'shows' | 'all' | undefined) ?? 'all';
+    const index = await loadLibraryIndex(filter);
+
+    type Verdict = {
+      input: (typeof items)[number];
+      inLibrary: boolean;
+      matchedBy: 'imdb' | 'tmdb' | 'tvdb' | 'title' | null;
+      match: PlexMetadata | null;
+    };
+
+    const verdicts: Verdict[] = items.map((input) => {
+      let match: PlexMetadata | undefined;
+      let matchedBy: Verdict['matchedBy'] = null;
+      if (input.imdbId && (match = index.byImdb.get(input.imdbId))) matchedBy = 'imdb';
+      else if (input.tmdbId != null && (match = index.byTmdb.get(String(input.tmdbId)))) matchedBy = 'tmdb';
+      else if (input.tvdbId != null && (match = index.byTvdb.get(String(input.tvdbId)))) matchedBy = 'tvdb';
+      else if (input.title && input.year && (match = index.byTitleYear.get(normalizeTitleKey(input.title, input.year)))) matchedBy = 'title';
+      return { input, inLibrary: !!match, matchedBy, match: match ?? null };
+    });
+
+    const presentCount = verdicts.filter((v) => v.inLibrary).length;
+    const missingCount = verdicts.length - presentCount;
+
+    const mode = returnOnly ?? 'all';
+    const selected =
+      mode === 'missing' ? verdicts.filter((v) => !v.inLibrary) :
+      mode === 'present' ? verdicts.filter((v) => v.inLibrary) :
+      verdicts;
+
+    const rows = selected.map((v) => {
+      const base: Record<string, unknown> = {
+        tmdbId: v.input.tmdbId ?? null,
+        imdbId: v.input.imdbId ?? null,
+        title: v.input.title ?? v.match?.title ?? null,
+        year: v.input.year ?? v.match?.year ?? null,
+        inLibrary: v.inLibrary,
+      };
+      if (v.inLibrary && v.match) {
+        base.matchedBy = v.matchedBy;
+        base.plexRatingKey = v.match.ratingKey ?? null;
+        base.plexTitle = v.match.title;
+        base.plexYear = v.match.year ?? null;
+      }
+      return base;
+    });
+
+    const summary = `${presentCount}/${items.length} present, ${missingCount} missing in Plex (library size: ${index.total}${returnOnly && returnOnly !== 'all' ? `, returning ${mode} only` : ''})`;
+
+    return envelope(summary, rows, {
+      presentCount,
+      missingCount,
+      librarySize: index.total,
+      section: filter,
+    });
   }),
   { annotations: { readOnlyHint: true } }
 );

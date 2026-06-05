@@ -497,9 +497,11 @@ function PromptBar({
 
 function ConfirmBar({
   request,
+  queueLength,
   onResolve,
 }: {
   request: ActiveConfirm;
+  queueLength: number;
   onResolve: (approved: boolean) => void;
 }) {
   useInput((ch, key) => {
@@ -512,6 +514,9 @@ function ConfirmBar({
     if (lower === 'n') onResolve(false);
   });
 
+  const queueNote =
+    queueLength > 1 ? ` (1 of ${queueLength} pending)` : '';
+
   return (
     <Box flexDirection="column">
       <Box
@@ -520,7 +525,7 @@ function ConfirmBar({
         borderColor="yellow"
         paddingX={1}
       >
-        <Text bold>Confirmation required</Text>
+        <Text bold>Confirmation required{queueNote}</Text>
         {request.lines.map((line, i) => (
           <Text key={i}>{line}</Text>
         ))}
@@ -561,7 +566,12 @@ export function App({ yolo: initialYolo, version, audit, startupLines }: AppProp
 
   const [streamingText, setStreamingText] = useState('');
   const [spinnerLabel, setSpinnerLabel] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<ActiveConfirm | null>(null);
+  // Queue, not a single slot — when the agent fires multiple mutating tool
+  // calls in one parallel batch we receive multiple promptConfirm() calls back
+  // to back. A single-slot state would have later calls overwrite earlier ones
+  // and strand their resolve() callbacks, deadlocking the agent loop.
+  const [confirmQueue, setConfirmQueue] = useState<ActiveConfirm[]>([]);
+  const activeConfirm = confirmQueue[0] ?? null;
   const [waitingForInput, setWaitingForInput] = useState(false);
   // Session-wide usage in React state so the StatusBar always reflects it,
   // separate from the per-turn `usage` history entry committed in <Static>.
@@ -592,7 +602,7 @@ export function App({ yolo: initialYolo, version, audit, startupLines }: AppProp
 
     const promptConfirm = (req: ConfirmRequest): Promise<boolean> =>
       new Promise((resolve) => {
-        setConfirm({ ...req, resolve });
+        setConfirmQueue((prev) => [...prev, { ...req, resolve }]);
       });
 
     const notifyBlocked = (notice: BlockedNotice) => {
@@ -844,9 +854,9 @@ export function App({ yolo: initialYolo, version, audit, startupLines }: AppProp
   };
 
   const handleConfirmResolve = (approved: boolean) => {
-    if (!confirm) return;
-    const snapshot = confirm;
-    setConfirm(null);
+    if (!activeConfirm) return;
+    const snapshot = activeConfirm;
+    setConfirmQueue((prev) => prev.slice(1));
     appendHistory({
       kind: 'confirm_resolved',
       displayName: snapshot.displayName,
@@ -856,7 +866,7 @@ export function App({ yolo: initialYolo, version, audit, startupLines }: AppProp
     snapshot.resolve(approved);
   };
 
-  const mode: 'idle' | 'thinking' | 'processing' | 'confirm' = confirm
+  const mode: 'idle' | 'thinking' | 'processing' | 'confirm' = activeConfirm
     ? 'confirm'
     : spinnerLabel === 'thinking'
       ? 'thinking'
@@ -870,8 +880,12 @@ export function App({ yolo: initialYolo, version, audit, startupLines }: AppProp
       {streamingText ? <Text>{renderMarkdown(streamingText)}</Text> : null}
       {spinnerLabel ? <Spinner label={spinnerLabel} /> : null}
       <StatusBar session={sessionUsage} mode={mode} yolo={yolo} toolCount={TOOL_COUNT} />
-      {confirm ? (
-        <ConfirmBar request={confirm} onResolve={handleConfirmResolve} />
+      {activeConfirm ? (
+        <ConfirmBar
+          request={activeConfirm}
+          queueLength={confirmQueue.length}
+          onResolve={handleConfirmResolve}
+        />
       ) : waitingForInput ? (
         <PromptBar active onSubmit={handleSubmit} commands={SLASH_COMMANDS} />
       ) : null}

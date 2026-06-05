@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   plex_apply_match,
+  plex_check_presence,
   plex_collecting_dust,
   plex_list_users,
   plex_quality_audit,
@@ -598,5 +599,116 @@ describe('plex_similar', () => {
       expect.objectContaining({ ratingKey: '101', title: 'Arrival', audienceRating: 8.1 }),
       expect.objectContaining({ ratingKey: '102', title: 'Annihilation', audienceRating: 7.5 }),
     ]);
+  });
+});
+
+describe('plex_check_presence', () => {
+  const sectionsResponse = {
+    MediaContainer: {
+      Directory: [
+        { key: '10', type: 'movie', title: 'Movies' },
+        { key: '11', type: 'show', title: 'TV Shows' },
+      ],
+    },
+  };
+
+  const movieLibrary = {
+    MediaContainer: {
+      Metadata: [
+        {
+          ratingKey: '111',
+          title: 'The Fly',
+          type: 'movie',
+          year: 1986,
+          Guid: [{ id: 'imdb://tt0091064' }, { id: 'tmdb://9426' }],
+        },
+        {
+          ratingKey: '222',
+          title: 'Carrie',
+          type: 'movie',
+          year: 1976,
+          Guid: [{ id: 'imdb://tt0074285' }, { id: 'tmdb://7340' }],
+        },
+        {
+          // No Guid array — only matchable by title+year.
+          ratingKey: '333',
+          title: 'Wait Until Dark',
+          type: 'movie',
+          year: 1967,
+        },
+      ],
+    },
+  };
+
+  it('matches by imdb, tmdb, and title+year, and returns presentCount / missingCount', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/10/all', { json: movieLibrary }),
+      route('GET', '/library/sections', { json: sectionsResponse }),
+    ]);
+
+    const result = await invoke(plex_check_presence, {
+      section: 'movies',
+      items: [
+        { imdbId: 'tt0091064', title: 'The Fly', year: 1986 }, // matched by imdb
+        { tmdbId: 7340, title: 'Carrie', year: 1976 }, // matched by tmdb
+        { title: 'Wait Until Dark', year: 1967 }, // matched by title+year fallback
+        { tmdbId: 99999, title: 'Made-up Horror', year: 2024 }, // missing
+      ],
+    });
+
+    // includeGuids should be set on the library fetch.
+    const libCall = calls.find((c) => c.url.includes('/library/sections/10/all'));
+    expect(libCall?.url).toContain('includeGuids=1');
+
+    const payload = JSON.parse((result.content[0] as { text: string }).text);
+    expect(payload.presentCount).toBe(3);
+    expect(payload.missingCount).toBe(1);
+    expect(payload.librarySize).toBe(3);
+    expect(payload.summary).toContain('3/4 present');
+
+    expect(payload.items).toEqual([
+      expect.objectContaining({ inLibrary: true, matchedBy: 'imdb', plexRatingKey: '111', plexTitle: 'The Fly' }),
+      expect.objectContaining({ inLibrary: true, matchedBy: 'tmdb', plexRatingKey: '222', plexTitle: 'Carrie' }),
+      expect.objectContaining({ inLibrary: true, matchedBy: 'title', plexRatingKey: '333', plexTitle: 'Wait Until Dark' }),
+      expect.objectContaining({ inLibrary: false, tmdbId: 99999, title: 'Made-up Horror' }),
+    ]);
+  });
+
+  it('filters output when returnOnly is "missing"', async () => {
+    installFetchMock([
+      route('GET', '/library/sections/10/all', { json: movieLibrary }),
+      route('GET', '/library/sections', { json: sectionsResponse }),
+    ]);
+
+    const result = await invoke(plex_check_presence, {
+      section: 'movies',
+      returnOnly: 'missing',
+      items: [
+        { imdbId: 'tt0091064' }, // present, should be filtered out
+        { tmdbId: 99999, title: 'Nope', year: 2024 },
+      ],
+    });
+
+    const payload = JSON.parse((result.content[0] as { text: string }).text);
+    expect(payload.presentCount).toBe(1);
+    expect(payload.missingCount).toBe(1);
+    expect(payload.items).toEqual([
+      expect.objectContaining({ inLibrary: false, tmdbId: 99999 }),
+    ]);
+    expect(payload.summary).toContain('returning missing only');
+  });
+
+  it('fetches once per matching section, not per input item', async () => {
+    const { calls } = installFetchMock([
+      route('GET', '/library/sections/10/all', { json: movieLibrary }),
+      route('GET', '/library/sections', { json: sectionsResponse }),
+    ]);
+
+    const manyInputs = Array.from({ length: 50 }, (_, i) => ({ tmdbId: 9000 + i }));
+    await invoke(plex_check_presence, { section: 'movies', items: manyInputs });
+
+    // One sections call + one per section, regardless of input size.
+    const libraryCalls = calls.filter((c) => c.url.includes('/library/sections/10/all'));
+    expect(libraryCalls).toHaveLength(1);
   });
 });

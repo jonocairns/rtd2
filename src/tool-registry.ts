@@ -17,7 +17,7 @@ import {
   overseerr_discover_hidden_gems,
   overseerr_report_issue,
 } from './tools/overseerr.js';
-import { mdblist_ratings } from './tools/mdblist.js';
+import { mdblist_list, mdblist_ratings } from './tools/mdblist.js';
 import {
   plex_recently_added,
   plex_watch_history,
@@ -26,6 +26,7 @@ import {
   plex_collecting_dust,
   plex_similar,
   plex_search,
+  plex_check_presence,
   plex_quality_profile,
   plex_quality_audit,
   plex_get_matches,
@@ -64,6 +65,7 @@ export const baseToolDescriptors = [
   overseerr_discover_hidden_gems,
   overseerr_report_issue,
   mdblist_ratings,
+  mdblist_list,
   plex_recently_added,
   plex_watch_history,
   plex_list_users,
@@ -71,6 +73,7 @@ export const baseToolDescriptors = [
   plex_collecting_dust,
   plex_similar,
   plex_search,
+  plex_check_presence,
   plex_quality_profile,
   plex_quality_audit,
   plex_get_matches,

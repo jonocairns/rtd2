@@ -193,3 +193,288 @@ export const mdblist_ratings = tool(
   }),
   { annotations: { readOnlyHint: true } }
 );
+
+interface MdbListItem {
+  id?: number;
+  mediatype?: string;
+  imdb_id?: string | null;
+  tvdb_id?: number | null;
+  ids?: {
+    imdb?: string | null;
+    tmdb?: number | null;
+    tvdb?: number | null;
+    mdblist?: string | null;
+  };
+  title?: string;
+  release_year?: number;
+  release_date?: string | null;
+  runtime?: number | null;
+  rank?: number;
+}
+
+interface MdbListResponse {
+  movies?: MdbListItem[];
+  shows?: MdbListItem[];
+  pagination?: {
+    limit?: number;
+    offset?: number;
+    total?: number;
+    has_more?: boolean;
+  };
+}
+
+const listMediaTypeSchema = z.preprocess(
+  (value) => {
+    if (typeof value !== 'string') return value;
+    const v = value.toLowerCase().replace(/[\s_-]+/g, '');
+    if (['show', 'shows', 'series', 'tv', 'tvshow', 'tvseries'].includes(v)) return 'tv';
+    if (['movies', 'film', 'films'].includes(v)) return 'movie';
+    return value;
+  },
+  z.enum(['movie', 'tv', 'all'])
+);
+
+// Accepts a full mdblist.com URL or a "user/slug" shorthand and returns the
+// pair the API expects. The list page URL embeds the same two segments after
+// /lists/, so we just look for that pattern.
+function parseListRef(input: string): { user: string; slug: string } {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error('list is required (URL or "user/slug")');
+
+  const urlMatch = trimmed.match(/\/lists\/([^/?#]+)\/([^/?#]+)/i);
+  if (urlMatch) return { user: urlMatch[1], slug: urlMatch[2] };
+
+  const shorthand = trimmed.replace(/^\/+|\/+$/g, '').split('/');
+  if (shorthand.length === 2 && shorthand[0] && shorthand[1]) {
+    return { user: shorthand[0], slug: shorthand[1] };
+  }
+
+  throw new Error(
+    `Could not parse list reference: ${input}. Expected an mdblist.com URL or "user/slug" shorthand.`
+  );
+}
+
+// Score thresholds shared between the list filter and any future filtered
+// readers. Missing scores never pass — there's no "unknown counts as pass".
+const ratingsFilterSchema = z
+  .object({
+    combinator: z
+      .enum(['any', 'all'])
+      .optional()
+      .describe('"any" returns titles passing AT LEAST ONE threshold; "all" requires every set threshold. Default "any".'),
+    minImdb: z.number().min(0).max(10).optional().describe('Minimum IMDb score (0–10).'),
+    minTomatoes: z.number().min(0).max(100).optional().describe('Minimum Rotten Tomatoes critic score (0–100).'),
+    minTomatoesAudience: z
+      .number()
+      .min(0)
+      .max(100)
+      .optional()
+      .describe('Minimum Rotten Tomatoes audience score (0–100). NOTE: MDBList rarely returns audience scores; items without one will not pass this threshold.'),
+    minMetacritic: z.number().min(0).max(100).optional().describe('Minimum Metacritic score (0–100).'),
+    minLetterboxd: z.number().min(0).max(10).optional().describe('Minimum Letterboxd score (0–10).'),
+  })
+  .refine(
+    (v) =>
+      v.minImdb != null ||
+      v.minTomatoes != null ||
+      v.minTomatoesAudience != null ||
+      v.minMetacritic != null ||
+      v.minLetterboxd != null,
+    { message: 'ratingsFilter needs at least one threshold (minImdb / minTomatoes / minTomatoesAudience / minMetacritic / minLetterboxd).' }
+  );
+
+interface ScoredItem {
+  imdb: number | null;
+  tomatoes: number | null;
+  tomatoesaudience: number | null;
+  metacritic: number | null;
+  letterboxd: number | null;
+}
+
+function extractScores(raw: MdbRating[] | undefined): ScoredItem {
+  const out: ScoredItem = {
+    imdb: null,
+    tomatoes: null,
+    tomatoesaudience: null,
+    metacritic: null,
+    letterboxd: null,
+  };
+  for (const r of raw ?? []) {
+    if (r.value == null) continue;
+    if (r.source === 'imdb') out.imdb = r.value;
+    else if (r.source === 'tomatoes') out.tomatoes = r.value;
+    else if (r.source === 'tomatoesaudience') out.tomatoesaudience = r.value;
+    else if (r.source === 'metacritic') out.metacritic = r.value;
+    else if (r.source === 'letterboxd') out.letterboxd = r.value;
+  }
+  return out;
+}
+
+function passesRatingsFilter(scores: ScoredItem, filter: z.infer<typeof ratingsFilterSchema>): boolean {
+  const checks: boolean[] = [];
+  // For each set threshold, a present score must exceed it. A null score never passes.
+  if (filter.minImdb != null) checks.push(scores.imdb != null && scores.imdb >= filter.minImdb);
+  if (filter.minTomatoes != null) checks.push(scores.tomatoes != null && scores.tomatoes >= filter.minTomatoes);
+  if (filter.minTomatoesAudience != null) checks.push(scores.tomatoesaudience != null && scores.tomatoesaudience >= filter.minTomatoesAudience);
+  if (filter.minMetacritic != null) checks.push(scores.metacritic != null && scores.metacritic >= filter.minMetacritic);
+  if (filter.minLetterboxd != null) checks.push(scores.letterboxd != null && scores.letterboxd >= filter.minLetterboxd);
+  if (checks.length === 0) return true; // schema requires ≥1, but be defensive
+  return (filter.combinator ?? 'any') === 'all' ? checks.every(Boolean) : checks.some(Boolean);
+}
+
+async function fetchRatingsByType(type: 'movie' | 'tv', ids: number[]): Promise<Map<number, MdbBulkItem>> {
+  const byId = new Map<number, MdbBulkItem>();
+  for (const batch of chunk(ids, BULK_CHUNK_SIZE)) {
+    const url = `https://api.mdblist.com/tmdb/${type === 'tv' ? 'show' : 'movie'}/?apikey=${encodeURIComponent(env.MDBLIST_API_KEY ?? '')}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ ids: batch }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`MDBList ${res.status} ${res.statusText} (${type} ratings batch): ${body.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as MdbBulkItem[];
+    for (const item of data ?? []) {
+      const id = item.ids?.tmdb ?? item.id;
+      if (typeof id === 'number') byId.set(id, item);
+    }
+  }
+  return byId;
+}
+
+export const mdblist_list = tool(
+  'mdblist_list',
+  'Fetch a public mdblist.com list, optionally filtering by rating thresholds in the same call. Accepts a full list URL or the "user/slug" shorthand. Pass `ratingsFilter` to combine list-fetch + ratings-fetch + filter in one request — this is the right shape for "what passes IMDb > 7 OR RT critic > 65 on this list" since it avoids returning hundreds of items just to filter them later. Returns title, year, IMDb/TMDb/TVDb ids, mediaType, releaseDate, runtime, rank; when filtered, also returns scores inline.',
+  {
+    list: z
+      .string()
+      .min(1)
+      .describe(
+        'List reference — either a full mdblist.com URL like "https://mdblist.com/lists/hdlists/latest-hd-horror-movies-top-rated-from-1980-to-today" or the "user/slug" shorthand.'
+      ),
+    mediaType: listMediaTypeSchema
+      .optional()
+      .describe('Filter results to one media type. Defaults to "all".'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(2000)
+      .optional()
+      .describe('Max items to return per page. Defaults to 1000 (the MDBList API default).'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Offset for pagination. Defaults to 0.'),
+    ratingsFilter: ratingsFilterSchema
+      .optional()
+      .describe('Optional rating thresholds. When set, the tool also fetches ratings for every list item and returns only those passing the filter, with scores inline. Use this to keep tool output small — without a filter, large lists (hundreds of items) can blow the context budget.'),
+  },
+  safe(async ({ list, mediaType, limit, offset, ratingsFilter }) => {
+    if (!env.MDBLIST_API_KEY) {
+      throw new Error('MDBLIST_API_KEY must be set in .env to use mdblist_list.');
+    }
+
+    const { user, slug } = parseListRef(list);
+    const url = new URL(
+      `https://api.mdblist.com/lists/${encodeURIComponent(user)}/${encodeURIComponent(slug)}/items`
+    );
+    url.searchParams.set('apikey', env.MDBLIST_API_KEY);
+    if (limit != null) url.searchParams.set('limit', String(limit));
+    if (offset != null) url.searchParams.set('offset', String(offset));
+
+    const res = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(
+        `MDBList ${res.status} ${res.statusText} for ${user}/${slug}: ${body.slice(0, 200)}`
+      );
+    }
+
+    const data = (await res.json()) as MdbListResponse;
+    // Re-normalize in the handler — the Zod preprocess covers the SDK path but
+    // direct handler invocations (tests, internal callers) skip it.
+    const rawFilter = (mediaType ?? 'all') as string;
+    const normalizedFilter = (() => {
+      const v = rawFilter.toLowerCase().replace(/[\s_-]+/g, '');
+      if (['show', 'shows', 'series', 'tv', 'tvshow', 'tvseries'].includes(v)) return 'tv';
+      if (['movies', 'film', 'films'].includes(v)) return 'movie';
+      return v === 'movie' ? 'movie' : v === 'tv' ? 'tv' : 'all';
+    })();
+    const raw: MdbListItem[] = [
+      ...(normalizedFilter === 'tv' ? [] : (data.movies ?? [])),
+      ...(normalizedFilter === 'movie' ? [] : (data.shows ?? [])),
+    ];
+
+    const baseItems = raw.map((item) => ({
+      title: item.title,
+      year: item.release_year,
+      mediaType: (item.mediatype === 'show' ? 'tv' : (item.mediatype ?? null)) as 'movie' | 'tv' | null,
+      imdbId: item.ids?.imdb ?? item.imdb_id ?? null,
+      tmdbId: item.ids?.tmdb ?? item.id ?? null,
+      tvdbId: item.ids?.tvdb ?? item.tvdb_id ?? null,
+      releaseDate: item.release_date ?? null,
+      runtime: item.runtime ?? null,
+      rank: item.rank ?? null,
+    }));
+
+    let items: (typeof baseItems[number] & { ratings?: ScoredItem })[] = baseItems;
+    let filterStats: { input: number; passed: number } | null = null;
+
+    if (ratingsFilter) {
+      const movieIds: number[] = [];
+      const tvIds: number[] = [];
+      for (const item of baseItems) {
+        if (item.tmdbId == null) continue;
+        if (item.mediaType === 'tv') tvIds.push(item.tmdbId);
+        else movieIds.push(item.tmdbId);
+      }
+
+      const [movieRatings, tvRatings] = await Promise.all([
+        movieIds.length ? fetchRatingsByType('movie', movieIds) : Promise.resolve(new Map<number, MdbBulkItem>()),
+        tvIds.length ? fetchRatingsByType('tv', tvIds) : Promise.resolve(new Map<number, MdbBulkItem>()),
+      ]);
+
+      const scored = baseItems
+        .map((item) => {
+          if (item.tmdbId == null) return null;
+          const ratingsItem = (item.mediaType === 'tv' ? tvRatings : movieRatings).get(item.tmdbId);
+          const scores = extractScores(ratingsItem?.ratings);
+          return passesRatingsFilter(scores, ratingsFilter)
+            ? { ...item, ratings: scores }
+            : null;
+        })
+        .filter((v): v is typeof baseItems[number] & { ratings: ScoredItem } => v != null);
+
+      filterStats = { input: baseItems.length, passed: scored.length };
+      items = scored;
+    }
+
+    const total = data.pagination?.total ?? baseItems.length;
+    const hasMore = data.pagination?.has_more ?? false;
+    const movieCount = (data.movies ?? []).length;
+    const showCount = (data.shows ?? []).length;
+    const summary = filterStats
+      ? `${user}/${slug} — ${filterStats.passed}/${filterStats.input} items pass ratingsFilter (combinator: ${ratingsFilter?.combinator ?? 'any'})`
+      : `${user}/${slug} — ${plural(items.length, 'item')} returned ` +
+        `(movies: ${movieCount}, shows: ${showCount}, total: ${total}${hasMore ? ', more available' : ''})`;
+
+    return envelope(summary, items, {
+      list: { user, slug },
+      pagination: {
+        limit: data.pagination?.limit ?? null,
+        offset: data.pagination?.offset ?? 0,
+        total,
+        hasMore,
+      },
+      ...(filterStats ? { filter: { ...filterStats, ...ratingsFilter } } : {}),
+    });
+  }),
+  { annotations: { readOnlyHint: true } }
+);
