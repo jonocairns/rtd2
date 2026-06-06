@@ -1,6 +1,6 @@
 import { render } from 'ink';
 import { App, type StartupLine } from './app.js';
-import type { AuditLog } from './audit.js';
+import type { AuditLog } from '../audit.js';
 
 export async function startRepl({
   yolo,

@@ -1,10 +1,31 @@
 # RTD2
 
-A terminal agent for managing a Plex library backed by Overseerr, Radarr, Sonarr, and mdblist.
+Media tools for managing a Plex library backed by Overseerr, Radarr, Sonarr, and MDBList.
 
-It can find things to watch, inspect low-quality downloads, re-grab bad files, fix Plex matches, and manage requests. Destructive actions go through a confirmation prompt.
+The durable shape of the repo is:
+
+```text
+Claude/Codex skills + MCP tools + tested media service clients
+```
+
+It can find things to watch, inspect low-quality downloads, re-grab bad files, fix Plex matches, and manage requests. The preferred integration path is Claude/Codex using the skills plus MCP tools. The terminal agent still exists as a local harness.
+
+Source code stays TypeScript-only. The `.js` suffixes in TypeScript imports are intentional for Node ESM / `NodeNext`; `tsc` emits the runtime JavaScript into gitignored `dist/`.
 
 ![media-agent CLI](rtd2.png)
+
+## Layout
+
+```text
+src/
+  clients/      reusable Plex and MDBList client logic
+  tools/        AI/MCP tool wrappers, schemas, idempotency, output envelopes
+  workflows/    deterministic cross-service flows
+  mcp/          stdio MCP server exposing the tool registry
+  cli/          optional Ink/AI SDK terminal agent harness
+skills/         Claude/Codex workflow instructions
+evals/          agent/tool-sequence evals
+```
 
 ## Prompts
 
@@ -101,4 +122,49 @@ Useful commands:
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm mcp
+pnpm mcp:dev
 ```
+
+`pnpm dev` runs the optional terminal agent from TypeScript. `pnpm mcp:dev` runs the MCP server from TypeScript with `tsx`.
+
+## MCP
+
+For host integrations, prefer the compiled MCP server:
+
+```bash
+pnpm build
+pnpm mcp
+```
+
+It exposes the same tool names from `src/tool-registry.ts`. Read-only tools run normally. Mutating tools are blocked unless the server is launched with `MCP_ALLOW_MUTATIONS=1`; use that only when your MCP host provides an approval surface you trust.
+
+Example MCP command:
+
+```json
+{
+  "command": "pnpm",
+  "args": ["mcp"],
+  "cwd": "/path/to/rtd2"
+}
+```
+
+During development, use:
+
+```json
+{
+  "command": "pnpm",
+  "args": ["mcp:dev"],
+  "cwd": "/path/to/rtd2"
+}
+```
+
+## Skills
+
+The skills in `skills/` are workflow instructions for Claude/Codex. They should explain how to compose tools, not contain executable API logic.
+
+- `media-list-gaps` - MDBList to Plex gap checks.
+- `media-quality-audit` - Plex file-quality inspection and safe replacement follow-up.
+- `media-request-flow` - Overseerr/Seerr request and approval discipline.
+- `media-recommendations` - library-first watch recommendations.
+- `scratch-sqlite` - temporary SQLite scratch space for large datasets.

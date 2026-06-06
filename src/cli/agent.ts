@@ -1,9 +1,9 @@
 import { streamText, stepCountIs } from 'ai';
-import type { CanUseTool } from './confirm.js';
-import { createMediaInvestigateTool, type SubagentEvent } from './investigator.js';
+import type { CanUseTool } from '../confirm.js';
+import { createMediaInvestigateTool, type SubagentEvent } from '../investigator.js';
 import { model, MODEL, providerOptions } from './model.js';
-import { baseToolDescriptors } from './tool-registry.js';
-import { toAiTools, type RuntimeTool } from './tool-runtime.js';
+import { baseToolDescriptors } from '../tool-registry.js';
+import { toAiTools, type RuntimeTool } from '../tool-runtime.js';
 
 globalThis.AI_SDK_LOG_WARNINGS = false;
 

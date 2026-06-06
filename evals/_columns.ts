@@ -1,5 +1,5 @@
 import type { Evalite } from 'evalite';
-import { MODEL } from '../src/agent.js';
+import { MODEL } from '../src/cli/agent.js';
 import { formatCost, getRates } from './_cost.js';
 import type { ScenarioResult } from './_runner.js';
 

@@ -7,11 +7,11 @@ import {
   createConfirmGate,
   type BlockedNotice,
   type ConfirmRequest,
-} from './confirm.js';
-import type { AuditLog } from './audit.js';
-import type { SubagentEvent } from './investigator.js';
-import { baseToolDescriptors } from './tool-registry.js';
-import { addUsage, costUsd, emptyUsage, renderMarkdown, type TokenUsage } from './ui.js';
+} from '../confirm.js';
+import type { AuditLog } from '../audit.js';
+import type { SubagentEvent } from '../investigator.js';
+import { baseToolDescriptors } from '../tool-registry.js';
+import { addUsage, costUsd, emptyUsage, renderMarkdown, type TokenUsage } from '../ui.js';
 
 const TOOL_COUNT = baseToolDescriptors.length + 1; // + media_investigate
 

@@ -1,5 +1,5 @@
 ---
-name: file-quality-audit
+name: media-quality-audit
 description: Inspect Plex file quality metadata to find low-quality downloads by container, video codec, resolution, bitrate, file size, and audio tracks, then propose safe Radarr/Sonarr follow-up actions.
 ---
 

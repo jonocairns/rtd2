@@ -3,9 +3,9 @@ import { env } from './env.js';
 import { validateConnection as validateOverseerr } from './tools/overseerr.js';
 import { validateConnection as validateRadarr } from './tools/radarr.js';
 import { validateConnection as validateSonarr } from './tools/sonarr.js';
-import { startRepl } from './repl.js';
+import { startRepl } from './cli/repl.js';
 import { AuditLog } from './audit.js';
-import type { StartupLine } from './app.js';
+import type { StartupLine } from './cli/app.js';
 
 const VERSION = process.env.npm_package_version ?? '0.1.0';
 

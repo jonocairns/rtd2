@@ -1,6 +1,6 @@
 import { generateText, stepCountIs } from 'ai';
 import { z } from 'zod';
-import { model, providerOptions } from './model.js';
+import { model, providerOptions } from './cli/model.js';
 import { readOnlyToolDescriptors } from './tool-registry.js';
 import { toAiTools, type RuntimeTool } from './tool-runtime.js';
 import { tool } from './tools/define.js';

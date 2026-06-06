@@ -23,22 +23,6 @@ const schema = z.object({
   RADARR_API_KEY: optionalString,
   SONARR_URL: optionalUrl,
   SONARR_API_KEY: optionalString,
-}).superRefine((data, ctx) => {
-  const provider = data.MODEL_PROVIDER ?? (data.OPENAI_API_KEY ? 'openai' : 'anthropic');
-  if (provider === 'openai' && !data.OPENAI_API_KEY) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['OPENAI_API_KEY'],
-      message: 'OPENAI_API_KEY is required when MODEL_PROVIDER=openai',
-    });
-  }
-  if (provider === 'anthropic' && !data.ANTHROPIC_API_KEY) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['ANTHROPIC_API_KEY'],
-      message: 'ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic',
-    });
-  }
 });
 
 const parsed = schema.safeParse(process.env);

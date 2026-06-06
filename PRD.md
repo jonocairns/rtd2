@@ -1,5 +1,7 @@
 # media-agent — PRD
 
+> **Status:** This is the historical agent-first PRD. The current repo direction is RTD2 as Claude/Codex skills + MCP tools + tested service clients. See [README.md](README.md) and [docs/architecture.md](docs/architecture.md) for the current structure.
+
 A REPL-based AI agent for managing a self-hosted media setup. You launch it, have a multi-turn conversation, and the agent uses its tools (Overseerr/Seerr, Plex) and skills (taste curation, library audits) to answer questions and perform actions on your library.
 
 > **mdblist not included.** The user already runs [ListSync](https://github.com/Woahai321/list-sync) to import mdblist curated lists into Overseerr — that workflow doesn't need to live in this agent. For ad-hoc additions, the user names titles directly and the agent searches + requests them.
@@ -124,7 +126,7 @@ Five skills, each focused. The agent picks which to load when based on the descr
 | `recommend-watch` | "What should I watch tonight" / mood queries | How to match the profile against existing-library candidates first, then fall back to discovery for things to request |
 | `find-and-add` | "Find me X" → request flow | How to compose `overseerr_search` results, deduplicate, propose a confirmation plan |
 | `library-audit` | "What's stale" / library stats queries | How to summarize library state: oldest unwatched, biggest unwatched genres, top-watched directors, completion gaps |
-| `file-quality-audit` | "What low-quality files do I have" / codec, resolution, bitrate, size, or audio-track queries | How to inspect Plex stream metadata and propose safe Radarr/Sonarr replacement follow-ups |
+| `media-quality-audit` | "What low-quality files do I have" / codec, resolution, bitrate, size, or audio-track queries | How to inspect Plex stream metadata and propose safe Radarr/Sonarr replacement follow-ups |
 
 Each `SKILL.md` has YAML frontmatter (`name`, `description`) plus the body of instructions. Bodies load on-demand — progressive disclosure keeps token usage reasonable.
 

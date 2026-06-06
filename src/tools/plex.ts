@@ -1,6 +1,7 @@
 import { tool } from './define.js';
 import { z } from 'zod';
 import { env } from '../env.js';
+import { PlexClient } from '../clients/plex/client.js';
 import { safe } from './errors.js';
 import { once } from './idempotency.js';
 import { envelope, plural } from './output.js';
@@ -560,24 +561,11 @@ export const plex_check_presence = tool(
   },
   safe(async ({ items, section, returnOnly }) => {
     const filter = (normalizeSection(section ?? 'all') as 'movies' | 'shows' | 'all' | undefined) ?? 'all';
-    const index = await loadLibraryIndex(filter);
-
-    type Verdict = {
-      input: (typeof items)[number];
-      inLibrary: boolean;
-      matchedBy: 'imdb' | 'tmdb' | 'tvdb' | 'title' | null;
-      match: PlexMetadata | null;
-    };
-
-    const verdicts: Verdict[] = items.map((input) => {
-      let match: PlexMetadata | undefined;
-      let matchedBy: Verdict['matchedBy'] = null;
-      if (input.imdbId && (match = index.byImdb.get(input.imdbId))) matchedBy = 'imdb';
-      else if (input.tmdbId != null && (match = index.byTmdb.get(String(input.tmdbId)))) matchedBy = 'tmdb';
-      else if (input.tvdbId != null && (match = index.byTvdb.get(String(input.tvdbId)))) matchedBy = 'tvdb';
-      else if (input.title && input.year && (match = index.byTitleYear.get(normalizeTitleKey(input.title, input.year)))) matchedBy = 'title';
-      return { input, inLibrary: !!match, matchedBy, match: match ?? null };
-    });
+    if (!env.PLEX_URL || !env.PLEX_TOKEN) {
+      throw new Error('PLEX_URL and PLEX_TOKEN must be set in .env to use Plex tools.');
+    }
+    const client = new PlexClient({ url: env.PLEX_URL, token: env.PLEX_TOKEN });
+    const { index, verdicts } = await client.checkPresence(items, filter);
 
     const presentCount = verdicts.filter((v) => v.inLibrary).length;
     const missingCount = verdicts.length - presentCount;

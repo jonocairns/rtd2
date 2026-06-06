@@ -8,9 +8,12 @@ The first step is Vercel AI SDK Core: it gives the project a vendor-neutral mode
 
 ## Current State
 
-- `src/agent.ts` owns the AI SDK model loop, provider selection, tool registration, and system prompt.
+- `src/cli/agent.ts` owns the AI SDK model loop, tool registration, and system prompt.
+- `src/cli/model.ts` owns provider selection.
 - `src/tools/*` exports local neutral tool descriptors plus service-specific helper functions.
-- `src/repl.ts` owns the CLI loop, spinner, streaming output rendering, tool-call display, and token usage display.
+- `src/clients/*` owns reusable service/client logic that should not import agent or CLI code.
+- `src/mcp/server.ts` exposes the tool registry over MCP stdio.
+- `src/cli/repl.tsx` owns the CLI loop, spinner, streaming output rendering, tool-call display, and token usage display.
 - `src/confirm.ts` gates mutating tools before execution and writes approval decisions to the audit log.
 - `src/audit.ts` records session, tool-call, and confirmation events.
 
@@ -22,11 +25,14 @@ Proposed structure:
 
 ```text
 src/
-  runtime/
+  cli/
     agent.ts          provider-agnostic model loop
-    tools.ts          AI SDK tool wrappers
-  tools/             service clients and shared result formatting
-  repl.ts            CLI loop calling the runtime stream
+    model.ts          provider/model selection
+    repl.tsx          CLI loop calling the runtime stream
+  clients/            reusable service clients
+  tools/              tool descriptors and shared result formatting
+  mcp/                MCP stdio adapter
+  workflows/          deterministic cross-service flows
 ```
 
 The long-term direction is:
@@ -35,7 +41,7 @@ The long-term direction is:
 - Service modules keep HTTP/API logic.
 - Mutating tools keep the existing CLI approval gate.
 - The CLI remains a thin local interface.
-- Mastra, MCP export, or a more durable orchestration layer can be added later without another provider migration.
+- Mastra or another orchestration layer can be added later without another provider migration.
 
 ## Migration Steps
 
@@ -65,7 +71,7 @@ After the AI SDK migration is stable, consider Mastra for:
 - enable Mastra local Studio for inspecting agent runs
 - add memory for session continuity
 - model selected workflows explicitly, such as "quality issue -> report issue -> offer re-grab"
-- expose the media tools as an MCP server
+- extend the existing MCP server with richer approval/token flows
 - add evals around the new agent/tool loop
 
 ## Provider Strategy

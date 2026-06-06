@@ -1,5 +1,5 @@
 import { reportTrace } from 'evalite/traces';
-import { run } from '../src/agent.js';
+import { run } from '../src/cli/agent.js';
 import type { CanUseTool } from '../src/confirm.js';
 import type { MockRoute } from '../src/tools/_testing.js';
 import { resetDbForTests } from '../src/db.js';
